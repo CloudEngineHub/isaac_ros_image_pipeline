@@ -18,15 +18,16 @@
 #ifndef ISAAC_ROS_IMAGE_PROC__IMAGE_NORMALIZE_NODE_HPP_
 #define ISAAC_ROS_IMAGE_PROC__IMAGE_NORMALIZE_NODE_HPP_
 
+#include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "cvcuda/OpNormalize.hpp"
 #include "cvcuda/OpConvertTo.hpp"
 #include "isaac_ros_common/cuda_stream.hpp"
 #include "isaac_ros_common/qos.hpp"
-#include "isaac_ros_nitros_image_type/nitros_image.hpp"
-#include "isaac_ros_nitros/types/cuda_memory_pool.hpp"
+#include "sensor_msgs/msg/image.hpp"
 #include "nvcv/Tensor.hpp"
 #include "rclcpp/rclcpp.hpp"
 
@@ -45,26 +46,27 @@ public:
   ~ImageNormalizeNode();
 
 private:
-  void imageSubCallback(const nvidia::isaac_ros::nitros::NitrosImage::SharedPtr msg);
+  void imageSubCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg);
 
   rclcpp::QoS input_qos_;
   rclcpp::QoS output_qos_;
 
-  rclcpp::Subscription<nvidia::isaac_ros::nitros::NitrosImage>::SharedPtr image_sub_;
-  rclcpp::Publisher<nvidia::isaac_ros::nitros::NitrosImage>::SharedPtr image_pub_;
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
 
   // Normalize node parameters
   const std::vector<double> mean_param_;
   const std::vector<double> stddev_param_;
-  const int64_t memory_pool_block_size_;
-  const int64_t memory_pool_num_blocks_;
 
   nvcv::Tensor mean_;
   nvcv::Tensor stddev_;
+  nvcv::Tensor float_tensor_;
+  uint32_t float_tensor_width_{0};
+  uint32_t float_tensor_height_{0};
+  std::string float_tensor_encoding_;
 
   // Resources
   ::nvidia::isaac_ros::common::CudaStreamPtr cuda_stream_;
-  nvidia::isaac_ros::nitros::CUDAMemoryPool pool_;
 
   // CVCUDA operations
   cvcuda::Normalize norm_op_;

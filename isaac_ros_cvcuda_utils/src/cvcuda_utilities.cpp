@@ -63,7 +63,8 @@ NVCVImageFormat ToNVCVFormat(const std::string & encoding)
         });
   auto it = str_to_nvcv_format.find(encoding);
   if (it == str_to_nvcv_format.end()) {
-    RCLCPP_ERROR(rclcpp::get_logger("cvcuda_utilities"), "Unsupported encoding: %s",
+    RCLCPP_ERROR(
+      rclcpp::get_logger("cvcuda_utilities"), "Unsupported encoding: %s",
       encoding.c_str());
     throw std::invalid_argument("cvcuda_utilities: Unsupported encoding: " + encoding);
   }
@@ -80,7 +81,8 @@ NVCVInterpolationType ToNVCVInterpolationType(const std::string & interp_type)
         });
   auto it = str_to_nvcv_interpolation_type.find(interp_type);
   if (it == str_to_nvcv_interpolation_type.end()) {
-    RCLCPP_ERROR(rclcpp::get_logger("cvcuda_utilities"), "Unsupported interpolation type: %s",
+    RCLCPP_ERROR(
+      rclcpp::get_logger("cvcuda_utilities"), "Unsupported interpolation type: %s",
       interp_type.c_str());
     throw std::invalid_argument("Unsupported interpolation type: " + interp_type);
   }
@@ -101,7 +103,8 @@ int32_t ToNVCVFlipMode(const std::string & flip_mode)
         });
   auto it = str_to_nvcv_flip_mode.find(flip_mode);
   if (it == str_to_nvcv_flip_mode.end()) {
-    RCLCPP_ERROR(rclcpp::get_logger("cvcuda_utilities"), "Unsupported flip mode: %s",
+    RCLCPP_ERROR(
+      rclcpp::get_logger("cvcuda_utilities"), "Unsupported flip mode: %s",
       flip_mode.c_str());
     throw std::invalid_argument("Unsupported flip mode: " + flip_mode);
   }
@@ -138,14 +141,18 @@ NVCVColorConversionCode ToNVCVColorConversionCode(
 
   const auto in_format = ToNVCVFormat(in_encoding);
   const auto out_format = ToNVCVFormat(out_encoding);
-  auto it = str_to_nvcv_color_conversion_code.find(std::make_pair(in_format.format,
-    out_format.format));
+  auto it = str_to_nvcv_color_conversion_code.find(
+    std::make_pair(
+      in_format.format,
+      out_format.format));
   if (it == str_to_nvcv_color_conversion_code.end()) {
-    RCLCPP_ERROR(rclcpp::get_logger("cvcuda_utilities"),
+    RCLCPP_ERROR(
+      rclcpp::get_logger("cvcuda_utilities"),
       "Unsupported color conversion pair: %s -> %s",
       in_encoding.c_str(), out_encoding.c_str());
-    throw std::invalid_argument("Unsupported color conversion pair: " +
-      in_encoding + " -> " + out_encoding);
+    throw std::invalid_argument(
+            "Unsupported color conversion pair: " +
+            in_encoding + " -> " + out_encoding);
   }
   return it->second;
 }
@@ -162,7 +169,8 @@ NVCVBorderType ToNVCVBorderType(const std::string & border_type)
         });
   auto it = str_to_nvcv_border_type.find(border_type);
   if (it == str_to_nvcv_border_type.end()) {
-    RCLCPP_ERROR(rclcpp::get_logger("cvcuda_utilities"), "Unsupported border type: %s",
+    RCLCPP_ERROR(
+      rclcpp::get_logger("cvcuda_utilities"), "Unsupported border type: %s",
       border_type.c_str());
     throw std::invalid_argument("Unsupported border type: " + border_type);
   }
@@ -179,7 +187,8 @@ NVCVRemapMapValueType ToNVCVRemapMapValueType(const std::string & remap_map_valu
         });
   auto it = str_to_nvcv_remap_map_value_type.find(remap_map_value_type);
   if (it == str_to_nvcv_remap_map_value_type.end()) {
-    RCLCPP_ERROR(rclcpp::get_logger("cvcuda_utilities"), "Unsupported remap map value type: %s",
+    RCLCPP_ERROR(
+      rclcpp::get_logger("cvcuda_utilities"), "Unsupported remap map value type: %s",
       remap_map_value_type.c_str());
     throw std::invalid_argument("Unsupported remap map value type: " + remap_map_value_type);
   }
@@ -196,34 +205,10 @@ nvcv::TensorLayout ToNVCVTensorLayout(const std::string & tensor_layout)
         });
   auto it = str_to_nvcv_tensor_layout.find(tensor_layout);
   if (it == str_to_nvcv_tensor_layout.end()) {
-    RCLCPP_ERROR(rclcpp::get_logger("cvcuda_utilities"), "Unsupported tensor layout: %s",
+    RCLCPP_ERROR(
+      rclcpp::get_logger("cvcuda_utilities"), "Unsupported tensor layout: %s",
       tensor_layout.c_str());
     throw std::invalid_argument("Unsupported tensor layout: " + tensor_layout);
-  }
-  return it->second;
-}
-
-nvcv::DataType ToNVCVDataType(const nvidia::isaac_ros::nitros::NitrosDataType & data_type)
-{
-  static const std::unordered_map<nvidia::isaac_ros::nitros::NitrosDataType,
-    nvcv::DataType> data_type_map({
-          {nvidia::isaac_ros::nitros::NitrosDataType::kInt8, nvcv::TYPE_S8},
-          {nvidia::isaac_ros::nitros::NitrosDataType::kUnsigned8, nvcv::TYPE_U8},
-          {nvidia::isaac_ros::nitros::NitrosDataType::kInt16, nvcv::TYPE_S16},
-          {nvidia::isaac_ros::nitros::NitrosDataType::kUnsigned16, nvcv::TYPE_U16},
-          {nvidia::isaac_ros::nitros::NitrosDataType::kInt32, nvcv::TYPE_S32},
-          {nvidia::isaac_ros::nitros::NitrosDataType::kUnsigned32, nvcv::TYPE_U32},
-          {nvidia::isaac_ros::nitros::NitrosDataType::kInt64, nvcv::TYPE_S64},
-          {nvidia::isaac_ros::nitros::NitrosDataType::kUnsigned64, nvcv::TYPE_U64},
-          {nvidia::isaac_ros::nitros::NitrosDataType::kFloat32, nvcv::TYPE_F32},
-          {nvidia::isaac_ros::nitros::NitrosDataType::kFloat64, nvcv::TYPE_F64},
-        });
-  auto it = data_type_map.find(data_type);
-  if (it == data_type_map.end()) {
-    RCLCPP_ERROR(rclcpp::get_logger("cvcuda_utilities"), "Unsupported data type: %d",
-      static_cast<int>(data_type));
-    throw std::invalid_argument("Unsupported data type: " +
-      std::to_string(static_cast<int>(data_type)));
   }
   return it->second;
 }
@@ -244,10 +229,12 @@ nvcv::DataType ToNVCVDataType(const nvcv::ImageFormat & image_format)
         });
   auto it = data_type_map.find(image_format);
   if (it == data_type_map.end()) {
-    RCLCPP_ERROR(rclcpp::get_logger("cvcuda_utilities"), "Unsupported image format: %s",
+    RCLCPP_ERROR(
+      rclcpp::get_logger("cvcuda_utilities"), "Unsupported image format: %s",
       nvcvImageFormatGetName(image_format));
-    throw std::invalid_argument(std::string("Unsupported image format: ") +
-      nvcvImageFormatGetName(image_format));
+    throw std::invalid_argument(
+            std::string("Unsupported image format: ") +
+            nvcvImageFormatGetName(image_format));
   }
   return it->second;
 }

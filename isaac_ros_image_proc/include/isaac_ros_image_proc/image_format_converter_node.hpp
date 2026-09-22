@@ -26,10 +26,9 @@
 #include "cvcuda/OpAdvCvtColor.hpp"
 #include "cvcuda/OpCvtColor.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "cvcuda_conversions/cvcuda_conversions.hpp"
 #include "isaac_ros_common/cuda_stream.hpp"
-#include "isaac_ros_cvcuda_utils/cvcuda_handle.hpp"
-#include "isaac_ros_nitros/types/cuda_memory_pool.hpp"
-#include "isaac_ros_nitros_image_type/nitros_image.hpp"
+#include "sensor_msgs/msg/image.hpp"
 #include "nvcv/ColorSpec.h"
 #include "nvcv/Tensor.hpp"
 
@@ -39,9 +38,6 @@ namespace isaac_ros
 {
 namespace image_proc
 {
-
-using OutputTensorHandle =
-  cvcuda_utils::CVCUDATensorHandle<nvidia::isaac_ros::nitros::WriteHandle>;
 
 class ImageFormatConverterNode : public rclcpp::Node
 {
@@ -55,16 +51,16 @@ public:
   ImageFormatConverterNode & operator=(const ImageFormatConverterNode &) = delete;
 
 private:
-  void imageSubCallback(const nvidia::isaac_ros::nitros::NitrosImage::SharedPtr msg);
-  void convertMultiplanar(const nvidia::isaac_ros::nitros::NitrosImage::SharedPtr & msg);
-  void convertMono8ToNV12(const nvidia::isaac_ros::nitros::NitrosImage::SharedPtr & msg);
+  void imageSubCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg);
+  void convertMultiplanar(const sensor_msgs::msg::Image::ConstSharedPtr & msg);
+  void convertMono8ToNV12(const sensor_msgs::msg::Image::ConstSharedPtr & msg);
 
-  std::pair<std::unique_ptr<nvidia::isaac_ros::nitros::NitrosImage>, OutputTensorHandle>
-  allocateOutput(const nvidia::isaac_ros::nitros::NitrosImage & msg);
+  std::unique_ptr<sensor_msgs::msg::Image> allocateOutput(
+    const sensor_msgs::msg::Image & msg);
 
   void publishOutput(
-    std::unique_ptr<nvidia::isaac_ros::nitros::NitrosImage> output_msg,
-    const nvidia::isaac_ros::nitros::NitrosImage & input_msg);
+    std::unique_ptr<sensor_msgs::msg::Image> output_msg,
+    const sensor_msgs::msg::Image & input_msg);
 
   // Parse a YUV color-spec string to a valid and corresponding NVCVColorSpec.
   static NVCVColorSpec ParseYuvColorSpec(const std::string & name);
@@ -73,19 +69,16 @@ private:
   const std::string encoding_desired_;
   const int32_t image_width_;
   const int32_t image_height_;
-  const int64_t memory_pool_block_size_;
-  const int64_t memory_pool_num_blocks_;
   const NVCVColorSpec yuv_color_spec_;
   const rclcpp::QoS input_qos_;
   const rclcpp::QoS output_qos_;
 
   // Subscribers and publishers
-  rclcpp::Subscription<nvidia::isaac_ros::nitros::NitrosImage>::SharedPtr image_sub_;
-  rclcpp::Publisher<nvidia::isaac_ros::nitros::NitrosImage>::SharedPtr image_pub_;
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
 
   // Resources
   ::nvidia::isaac_ros::common::CudaStreamPtr cuda_stream_;
-  nvidia::isaac_ros::nitros::CUDAMemoryPool pool_;
 
   // CVCUDA operations
   cvcuda::CvtColor cvt_color_op_;

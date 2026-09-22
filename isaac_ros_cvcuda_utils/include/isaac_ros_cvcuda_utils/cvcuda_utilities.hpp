@@ -21,8 +21,6 @@
 #include <string>
 #include <utility>
 
-#include "isaac_ros_nitros_image_type/nitros_image.hpp"
-#include "isaac_ros_nitros_tensor_list_type/nitros_data_type.hpp"
 #include "cvcuda/Types.h"
 #include "sensor_msgs/image_encodings.hpp"
 #include "nvcv/BorderType.h"
@@ -107,20 +105,12 @@ NVCVRemapMapValueType ToNVCVRemapMapValueType(const std::string & remap_map_valu
 nvcv::TensorLayout ToNVCVTensorLayout(const std::string & tensor_layout);
 
 /**
- * @brief Convert a string data type into a nvcv::DataType
- *
- * @param data_type
- * @return nvcv::DataType
- */
-nvcv::DataType ToNVCVDataType(const nvidia::isaac_ros::nitros::NitrosDataType & data_type);
-
-/**
  * @brief
  *
  * @param data_type
  * @return nvcv::DataType
  */
-nvcv::DataType ToNVCVDataType(const  nvcv::ImageFormat & image_format);
+nvcv::DataType ToNVCVDataType(const nvcv::ImageFormat & image_format);
 
 /**
  * @brief Check whether an encoding is a semi-planar multiplanar format

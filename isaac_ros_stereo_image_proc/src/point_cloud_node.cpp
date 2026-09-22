@@ -17,18 +17,15 @@
 
 #include "isaac_ros_stereo_image_proc/point_cloud_node.hpp"
 
-#include <cstdio>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
 
+#include "cuda_buffer/cuda_buffer_api.hpp"
 #include "isaac_ros_common/qos.hpp"
-
-#include "isaac_ros_nitros_disparity_image_type/nitros_disparity_image.hpp"
-#include "isaac_ros_nitros_image_type/nitros_image.hpp"
-#include "isaac_ros_nitros_point_cloud_type/nitros_point_cloud.hpp"
-
-#include "rclcpp/rclcpp.hpp"
+#include "pointcloud_conversions/pointcloud_conversions.hpp"
+#include "sensor_msgs/image_encodings.hpp"
 
 namespace nvidia
 {
@@ -41,12 +38,6 @@ PointCloudNode::PointCloudNode(const rclcpp::NodeOptions & options)
 : rclcpp::Node("point_cloud_node", options),
   use_color_(declare_parameter<bool>("use_color", false)),
   unit_scaling_(declare_parameter<float>("unit_scaling", 1.0)),
-  // 1920 * 1200 resolution, 4 XYZRGB or 3 XYZ float fields, 4 bytes per float.
-  memory_pool_block_size_(declare_parameter<int64_t>(
-      "memory_pool_block_size",
-      static_cast<int64_t>(1920) * 1200 * (use_color_ ? 4 : 3) *
-      static_cast<int64_t>(sizeof(float)))),
-  memory_pool_num_blocks_(declare_parameter<int64_t>("memory_pool_num_blocks", 40)),
   input_queue_size_(declare_parameter<int64_t>("input_queue_size", 10)),
   output_queue_size_(declare_parameter<int64_t>("output_queue_size", 10)),
   left_image_sub_{},
@@ -60,35 +51,28 @@ PointCloudNode::PointCloudNode(const rclcpp::NodeOptions & options)
 
   cuda_stream_ = ::nvidia::isaac_ros::common::createCudaStream("PointCloudNode");
 
-  CHECK_CUDA_ERROR(pool_.create(
-    static_cast<size_t>(memory_pool_block_size_),
-    static_cast<size_t>(memory_pool_num_blocks_),
-    nvidia::isaac_ros::nitros::CUDAMemoryPool::MemoryType::Device),
-    "[PointCloudNode] Failed to create CUDA memory pool");
-
   // Exact synchronization policy
   exact_sync_.registerCallback(std::bind(&PointCloudNode::PointCloudCallback, this,
     std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4));
 
-  // Subscribers (message_filters::Subscriber::subscribe takes rclcpp::QoS in ROS2 Jazzy)
   const rclcpp::QoS input_qos = ::isaac_ros::common::AddQosParameter(
     *this, "DEFAULT", "input_qos").keep_last(input_queue_size_);
   const rclcpp::QoS output_qos = ::isaac_ros::common::AddQosParameter(
     *this, "DEFAULT", "output_qos").keep_last(output_queue_size_);
-  const rmw_qos_profile_t rmw_qos_profile = input_qos.get_rmw_qos_profile();
 
+  // Subscribers (message_filters::Subscriber::subscribe takes rclcpp::QoS in ROS 2 Jazzy)
   rclcpp::SubscriptionOptions sub_options;
   sub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
-  left_image_sub_.subscribe(this, "left/image_rect_color", rmw_qos_profile, sub_options);
-  disparity_sub_.subscribe(this, "disparity", rmw_qos_profile, sub_options);
-  left_camera_info_sub_.subscribe(this, "left/camera_info", rmw_qos_profile, sub_options);
-  right_camera_info_sub_.subscribe(this, "right/camera_info", rmw_qos_profile, sub_options);
+  sub_options.acceptable_buffer_backends = "any";
+  left_image_sub_.subscribe(this, "left/image_rect_color", input_qos, sub_options);
+  disparity_sub_.subscribe(this, "disparity", input_qos, sub_options);
+  left_camera_info_sub_.subscribe(this, "left/camera_info", input_qos, sub_options);
+  right_camera_info_sub_.subscribe(this, "right/camera_info", input_qos, sub_options);
 
   // Publisher
   rclcpp::PublisherOptions pub_options;
   pub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
-
-  point_cloud_pub_ = create_publisher<nvidia::isaac_ros::nitros::NitrosPointCloud>(
+  point_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
     "points2", output_qos, pub_options);
 
   cloud_compute_.SetUnitScaling(unit_scaling_);
@@ -98,40 +82,38 @@ PointCloudNode::PointCloudNode(const rclcpp::NodeOptions & options)
 PointCloudNode::~PointCloudNode() {}
 
 PointCloudProperties PointCloudNode::CreateCloudProperties(
-  const nvidia::isaac_ros::nitros::NitrosDisparityImage::ConstSharedPtr & disparity_msg)
+  const sensor_msgs::msg::PointCloud2 & point_cloud_msg)
 {
   PointCloudProperties cloud_properties;
   const int point_step = use_color_ ? 4 : 3;
-  const unsigned int byte_unit_conversion_factor = sizeof(float);
 
-  cloud_properties.point_row_step = point_step * disparity_msg->width;
+  cloud_properties.point_row_step = point_step * point_cloud_msg.width;
   cloud_properties.point_step = point_step;
   cloud_properties.x_offset = 0;
   cloud_properties.y_offset = 1;
   cloud_properties.z_offset = 2;
-  cloud_properties.is_bigendian = false;
+  cloud_properties.is_bigendian = point_cloud_msg.is_bigendian;
   cloud_properties.bad_point = std::numeric_limits<float>::quiet_NaN();
   if (use_color_) {
     cloud_properties.rgb_offset = 3;
   }
-  cloud_properties.buffer_size = point_step * disparity_msg->width * disparity_msg->height *
-    byte_unit_conversion_factor;
+  cloud_properties.buffer_size = point_cloud_msg.row_step * point_cloud_msg.height;
 
   return cloud_properties;
 }
 
 DisparityProperties PointCloudNode::CreateDisparityProperties(
-  const nvidia::isaac_ros::nitros::NitrosDisparityImage::ConstSharedPtr & disparity_msg)
+  const stereo_msgs::msg::DisparityImage::ConstSharedPtr & disparity_msg)
 {
-  unsigned int bytes_per_element = sensor_msgs::image_encodings::bitDepth(
-    disparity_msg->encoding) / 8;
+  const unsigned int bytes_per_element = sensor_msgs::image_encodings::bitDepth(
+    disparity_msg->image.encoding) / 8;
 
   DisparityProperties disparity_properties;
-  auto disp_step = disparity_msg->width * bytes_per_element;
-  disparity_properties.row_step = disparity_msg->width;
-  disparity_properties.height = disparity_msg->height;
-  disparity_properties.width = disparity_msg->width;
-  disparity_properties.buffer_size = disp_step * disparity_msg->height * bytes_per_element;
+  const auto disp_step = disparity_msg->image.width * bytes_per_element;
+  disparity_properties.row_step = disparity_msg->image.width;
+  disparity_properties.height = disparity_msg->image.height;
+  disparity_properties.width = disparity_msg->image.width;
+  disparity_properties.buffer_size = disp_step * disparity_msg->image.height;
 
   return disparity_properties;
 }
@@ -147,12 +129,12 @@ CameraIntrinsics PointCloudNode::CreateCameraIntrinsics(
   const sensor_msgs::msg::CameraInfo::ConstSharedPtr & right_camera_info)
 {
   CameraIntrinsics intrinsics;
-  double fx = left_camera_info->p[0];
-  double fy = left_camera_info->p[5];
-  double cx = left_camera_info->p[2];
-  double cx_prime = right_camera_info->p[2];
-  double cy = left_camera_info->p[6];
-  double tx = right_camera_info->p[0] == 0.0 ? right_camera_info->p[3] :
+  const double fx = left_camera_info->p[0];
+  const double fy = left_camera_info->p[5];
+  const double cx = left_camera_info->p[2];
+  const double cx_prime = right_camera_info->p[2];
+  const double cy = left_camera_info->p[6];
+  const double tx = right_camera_info->p[0] == 0.0 ? right_camera_info->p[3] :
     right_camera_info->p[3] / right_camera_info->p[0];
 
   intrinsics.reprojection_matrix[0][0] = fy * tx;
@@ -168,10 +150,10 @@ CameraIntrinsics PointCloudNode::CreateCameraIntrinsics(
 }
 
 RGBProperties PointCloudNode::CreateRGBProperties(
-  const nvidia::isaac_ros::nitros::NitrosImage::ConstSharedPtr & rgb_msg)
+  const sensor_msgs::msg::Image::ConstSharedPtr & rgb_msg)
 {
   RGBProperties rgb_properties;
-  auto rgb_step = rgb_msg->step;
+  const auto rgb_step = rgb_msg->step;
   rgb_properties.row_step = rgb_step;
   rgb_properties.height = rgb_msg->height;
   rgb_properties.width = rgb_msg->width;
@@ -203,82 +185,80 @@ RGBProperties PointCloudNode::CreateRGBProperties(
 bool PointCloudNode::SelectDisparityFormatAndCompute(
   float * point_cloud_output,
   const PointCloudProperties & cloud_properties,
-  const nvidia::isaac_ros::nitros::NitrosDisparityImage::ConstSharedPtr & disparity_msg,
+  const stereo_msgs::msg::DisparityImage::ConstSharedPtr & disparity_msg,
   const DisparityProperties & disparity_properties,
-  const nvidia::isaac_ros::nitros::NitrosImage::ConstSharedPtr & rgb_msg,
+  const sensor_msgs::msg::Image::ConstSharedPtr & rgb_msg,
   const RGBProperties & rgb_properties,
   const CameraIntrinsics & intrinsics)
 {
-  auto disparity_encoding = disparity_msg->get_encoding();
+  // Select the appropriate disparity type so that the disparity image is interpreted correctly
+  const auto & disparity_encoding = disparity_msg->image.encoding;
 
-  // Select the appropiate disparity type so that the disparity image is interpreted correctly
-  if (disparity_encoding == "32FC1") {
-    auto disparity_read_handle = disparity_msg->get_read_handle(*cuda_stream_);
+  if (disparity_encoding == sensor_msgs::image_encodings::TYPE_32FC1) {
+    // Get read handles and device pointers for disparity and RGB inputs
+    auto disparity_read_handle = cuda_buffer_backend::from_input_buffer(
+      disparity_msg->image.data, *cuda_stream_);
     const float * disparity_buffer =
       reinterpret_cast<const float *>(disparity_read_handle.get_ptr());
-    auto rgb_read_handle = rgb_msg->get_read_handle(*cuda_stream_);
+    auto rgb_read_handle = cuda_buffer_backend::from_input_buffer(
+      rgb_msg->data, *cuda_stream_);
     cloud_compute_.ComputePointCloudData<float>(
       point_cloud_output, cloud_properties, disparity_buffer, disparity_properties,
       rgb_read_handle.get_ptr(), rgb_properties, intrinsics, *cuda_stream_);
+    CHECK_CUDA_ERROR(
+      cudaStreamSynchronize(*cuda_stream_), "[PointCloudNode] cudaStreamSynchronize");
     return true;
-  } else {
-    RCLCPP_ERROR(get_logger(),
-      "[PointCloudNode] Unsupported disparity encoding, Not computing point cloud");
-    return false;
   }
+
+  RCLCPP_ERROR(get_logger(),
+    "[PointCloudNode] Unsupported disparity encoding, Not computing point cloud");
+  return false;
 }
 
 void PointCloudNode::PointCloudCallback(
-  const nvidia::isaac_ros::nitros::NitrosImage::ConstSharedPtr & left_image_msg,
-  const nvidia::isaac_ros::nitros::NitrosDisparityImage::ConstSharedPtr & disparity_msg,
+  const sensor_msgs::msg::Image::ConstSharedPtr & left_image_msg,
+  const stereo_msgs::msg::DisparityImage::ConstSharedPtr & disparity_msg,
   const sensor_msgs::msg::CameraInfo::ConstSharedPtr & left_camera_info_msg,
   const sensor_msgs::msg::CameraInfo::ConstSharedPtr & right_camera_info_msg)
 {
   RCLCPP_DEBUG(get_logger(), "[PointCloudNode] PointCloudCallback");
 
-  // Create output NitrosPointCloud and get write handle
-  uint32_t width = static_cast<uint32_t>(disparity_msg->width);
-  uint32_t height = static_cast<uint32_t>(disparity_msg->height);
-  const uint32_t point_step = use_color_ ?
-    static_cast<uint32_t>(4 * sizeof(float)) : static_cast<uint32_t>(3 * sizeof(float));
-  const uint32_t row_step = width * point_step;
+  const uint32_t width = disparity_msg->image.width;
+  const uint32_t height = disparity_msg->image.height;
 
-  RCLCPP_DEBUG(get_logger(), "[PointCloudNode] Creating output NitrosPointCloud");
-  nvidia::isaac_ros::nitros::NitrosPointCloud point_cloud_msg;
-  auto point_cloud_write_handle = point_cloud_msg.from_pool(
-    pool_, width, height, point_step, row_step, false, use_color_, *cuda_stream_);
-  float * point_cloud_ptr = reinterpret_cast<float *>(point_cloud_write_handle.get_ptr());
+  // Create output point cloud message
+  auto point_cloud_msg =
+    pointcloud_conversions::allocate_point_cloud_msg(width, height, use_color_);
+  point_cloud_msg->header = left_image_msg->header;
 
-  // Formart output point cloud message
-  RCLCPP_DEBUG(get_logger(), "[Point Cloud] Start Creating Properties");
-  auto cloud_properties = CreateCloudProperties(disparity_msg);
+  {
+    // Get write handle for the output point cloud
+    auto point_cloud_write_handle = pointcloud_conversions::from_output_point_cloud_msg(
+      *point_cloud_msg, *cuda_stream_);
+    float * point_cloud_ptr = reinterpret_cast<float *>(point_cloud_write_handle.get_ptr());
 
-  // Calculate camera intrinsics
-  auto intrinsics = CreateCameraIntrinsics(left_camera_info_msg, right_camera_info_msg);
+    // Format output point cloud message
+    const auto cloud_properties = CreateCloudProperties(*point_cloud_msg);
 
-  // Fulfill the disparity image properties
-  auto disparity_properties = CreateDisparityProperties(disparity_msg);
+    // Calculate camera intrinsics
+    const auto intrinsics = CreateCameraIntrinsics(
+      left_camera_info_msg, right_camera_info_msg);
 
-  // Fulfill the rgb image properties
-  RGBProperties rgb_properties;
-  if (use_color_) {
-    rgb_properties = CreateRGBProperties(left_image_msg);
-    cloud_compute_.SetUseColor(true);
+    // Fulfill the disparity image properties
+    const auto disparity_properties = CreateDisparityProperties(disparity_msg);
+
+    // Fulfill the RGB image properties
+    RGBProperties rgb_properties;
+    if (use_color_) {
+      rgb_properties = CreateRGBProperties(left_image_msg);
+      cloud_compute_.SetUseColor(true);
+    }
+
+    // Compute the point cloud
+    SelectDisparityFormatAndCompute(
+      point_cloud_ptr, cloud_properties, disparity_msg, disparity_properties,
+      left_image_msg, rgb_properties, intrinsics);
   }
-
-  // Compute the point clouds
-  SelectDisparityFormatAndCompute(
-    point_cloud_ptr, cloud_properties, disparity_msg, disparity_properties,
-    left_image_msg, rgb_properties, intrinsics);
-
-  point_cloud_msg.width = width;
-  point_cloud_msg.height = height;
-  point_cloud_msg.point_step = point_step;
-  point_cloud_msg.row_step = row_step;
-  point_cloud_msg.is_bigendian = false;
-  point_cloud_msg.frame_id = left_image_msg->frame_id;
-  point_cloud_msg.timestamp_sec = left_image_msg->timestamp_sec;
-  point_cloud_msg.timestamp_nsec = left_image_msg->timestamp_nsec;
 
   point_cloud_pub_->publish(std::move(point_cloud_msg));
 }

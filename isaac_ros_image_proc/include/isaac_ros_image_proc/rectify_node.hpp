@@ -24,20 +24,18 @@
 #include <utility>
 #include <vector>
 
-#include "message_filters/subscriber.h"
-#include "message_filters/synchronizer.h"
-#include "message_filters/sync_policies/exact_time.h"
+#include "message_filters/subscriber.hpp"
+#include "message_filters/synchronizer.hpp"
+#include "message_filters/sync_policies/exact_time.hpp"
 
 #include "cvcuda/OpRemap.hpp"
 #include "isaac_ros_common/cuda_stream.hpp"
-#include "isaac_ros_cvcuda_utils/cvcuda_handle.hpp"
-#include "isaac_ros_nitros/types/cuda_memory_pool.hpp"
-#include "isaac_ros_nitros/types/nitros_type_message_filter_traits.hpp"
-#include "isaac_ros_nitros_image_type/nitros_image.hpp"
+#include "cvcuda_conversions/cvcuda_conversions.hpp"
 #include "nvcv/Tensor.hpp"
 #include "opencv2/calib3d.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
+#include "sensor_msgs/msg/image.hpp"
 
 namespace nvidia
 {
@@ -61,7 +59,7 @@ private:
   nvcv::Tensor WrapOpencvCVMapToCVCUDATensor(const cv::Mat & mat, void * map_buffer);
   void InitRemapMapAndOutputCameraInfo(const sensor_msgs::msg::CameraInfo & camera_info);
   void InputCallback(
-    const nvidia::isaac_ros::nitros::NitrosImage::ConstSharedPtr & image,
+    const sensor_msgs::msg::Image::ConstSharedPtr & image,
     const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info);
 
   int16_t output_width_;
@@ -74,23 +72,20 @@ private:
   bool align_corners_;
   std::string map_value_type_;
   std::string map_interpolation_type_;
-  const int64_t memory_pool_block_size_;
-  const int64_t memory_pool_num_blocks_;
   int64_t input_queue_size_;
   int64_t output_queue_size_;
 
   // Subscriptions and publishers
-  message_filters::Subscriber<nvidia::isaac_ros::nitros::NitrosImage> image_sub_;
+  message_filters::Subscriber<sensor_msgs::msg::Image> image_sub_;
   message_filters::Subscriber<sensor_msgs::msg::CameraInfo> camera_info_sub_;
 
-  rclcpp::Publisher<nvidia::isaac_ros::nitros::NitrosImage>::SharedPtr image_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_pub_;
   using ExactPolicy = message_filters::sync_policies::ExactTime<
-    nvidia::isaac_ros::nitros::NitrosImage, sensor_msgs::msg::CameraInfo>;
+    sensor_msgs::msg::Image, sensor_msgs::msg::CameraInfo>;
   message_filters::Synchronizer<ExactPolicy> exact_sync_;
 
   // CUDA resources
-  nvidia::isaac_ros::nitros::CUDAMemoryPool pool_;
   ::nvidia::isaac_ros::common::CudaStreamPtr cuda_stream_;
 
   // CVCUDA operation

@@ -20,6 +20,7 @@
 #include <string>
 #include <stdexcept>
 
+#include "cuda_buffer/cuda_buffer_api.hpp"
 #include "isaac_ros_common/cuda_stream.hpp"
 #include "isaac_ros_common/qos.hpp"
 #include "sensor_msgs/image_encodings.hpp"
@@ -30,7 +31,6 @@ namespace isaac_ros
 {
 namespace image_proc
 {
-using nvidia::isaac_ros::nitros::NitrosImage;
 namespace
 {
 constexpr const char kDefaultQoS[] = "SENSOR_DATA";
@@ -39,8 +39,6 @@ constexpr const char kDefaultQoS[] = "SENSOR_DATA";
 AlphaBlendNode::AlphaBlendNode(const rclcpp::NodeOptions & options)
 : rclcpp::Node("alpha_blend_node", options),
   alpha_(declare_parameter<double>("alpha", 0.5)),
-  memory_pool_block_size_(declare_parameter<int>("memory_pool_block_size", 1920 * 1200 * 4)),
-  memory_pool_num_blocks_(declare_parameter<int>("memory_pool_num_blocks", 40)),
   input_queue_size_(declare_parameter<int64_t>("input_queue_size", 10)),
   output_queue_size_(declare_parameter<int64_t>("output_queue_size", 10)),
   image_sub_{},
@@ -56,22 +54,16 @@ AlphaBlendNode::AlphaBlendNode(const rclcpp::NodeOptions & options)
 
   cuda_stream_ = ::nvidia::isaac_ros::common::createCudaStream("AlphaBlendNode");
 
-  // Create CUDA memory pool
-  cudaError_t err = pool_.create(
-    static_cast<size_t>(memory_pool_block_size_),
-    static_cast<size_t>(memory_pool_num_blocks_),
-    nvidia::isaac_ros::nitros::CUDAMemoryPool::MemoryType::Device);
-  CHECK_CUDA_ERROR(err, "Failed to create CUDA memory pool");
-
   rclcpp::QoS input_qos = ::isaac_ros::common::AddQosParameter(*this, kDefaultQoS, "input_qos")
     .keep_last(input_queue_size_);
   rclcpp::QoS output_qos = ::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "output_qos")
     .keep_last(output_queue_size_);
-  const rmw_qos_profile_t input_qos_profile = input_qos.get_rmw_qos_profile();
 
   // Subscription options
   rclcpp::SubscriptionOptions sub_options;
   sub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
+  // Accept GPU-backed image buffers; from_input_buffer promotes CPU buffers as needed.
+  sub_options.acceptable_buffer_backends = "any";
   // Publisher options
   rclcpp::PublisherOptions pub_options;
   pub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
@@ -80,11 +72,11 @@ AlphaBlendNode::AlphaBlendNode(const rclcpp::NodeOptions & options)
     std::bind(
       &AlphaBlendNode::InputCallback, this,
       std::placeholders::_1, std::placeholders::_2));
-  image_sub_.subscribe(this, "image_input", input_qos_profile, sub_options);
-  mask_sub_.subscribe(this, "mask_input", input_qos_profile, sub_options);
+  image_sub_.subscribe(this, "image_input", input_qos, sub_options);
+  mask_sub_.subscribe(this, "mask_input", input_qos, sub_options);
 
   // Publisher for output image
-  image_pub_ = create_publisher<nvidia::isaac_ros::nitros::NitrosImage>(
+  image_pub_ = create_publisher<sensor_msgs::msg::Image>(
     "blended_image", output_qos, pub_options);
 
   RCLCPP_INFO(get_logger(), "[AlphaBlendNode] Alpha blend node initialized");
@@ -93,8 +85,8 @@ AlphaBlendNode::AlphaBlendNode(const rclcpp::NodeOptions & options)
 AlphaBlendNode::~AlphaBlendNode() {}
 
 void AlphaBlendNode::InputCallback(
-  const nvidia::isaac_ros::nitros::NitrosImage::ConstSharedPtr & img,
-  const nvidia::isaac_ros::nitros::NitrosImage::ConstSharedPtr & mask)
+  const sensor_msgs::msg::Image::ConstSharedPtr & img,
+  const sensor_msgs::msg::Image::ConstSharedPtr & mask)
 {
   // Throw error if two images are not the same size
   if (mask->width != img->width ||
@@ -111,30 +103,38 @@ void AlphaBlendNode::InputCallback(
   // Image properties
   int width = img->width;
   int height = img->height;
-  // Input image and mask pointers
-  auto input_mask_handle = mask->get_read_handle(*cuda_stream_);
-  auto input_img_handle = img->get_read_handle(*cuda_stream_);
-  const uint8_t * input_mask = static_cast<const uint8_t *>(input_mask_handle.get_ptr());
-  const uint8_t * input_img = static_cast<const uint8_t *>(input_img_handle.get_ptr());
 
   // Create output image
-  auto output_msg = std::make_unique<nvidia::isaac_ros::nitros::NitrosImage>();
-  auto output_write_handle = output_msg->from_pool(
-    pool_, width, height, img->step, img->encoding, *cuda_stream_);
-  uint8_t * output_image = static_cast<uint8_t *>(output_write_handle.get_ptr());
+  auto output_msg = std::make_unique<sensor_msgs::msg::Image>();
+  output_msg->header = img->header;
+  output_msg->height = height;
+  output_msg->width = width;
+  output_msg->encoding = img->encoding;
+  output_msg->is_bigendian = img->is_bigendian;
+  output_msg->step = img->step;
+  output_msg->data = cuda_buffer_backend::allocate_buffer(
+    static_cast<size_t>(img->step) * height);
 
   // Run alpha blending on GPU using CUDA
   bool is_mono = sensor_msgs::image_encodings::isMono(mask->encoding);
 
-  AlphaBlend(
-    output_image, input_mask, input_img,
-    width, height, alpha_, is_mono, *cuda_stream_);
-  CHECK_CUDA_ERROR(cudaGetLastError(), "Failed to execute alpha blending");
-  CHECK_CUDA_ERROR(cudaStreamSynchronize(*cuda_stream_), "Failed to synchronize CUDA stream");
+  // Scope the handles so the read/write CUDA events are recorded on the stream
+  // before the output message is published.
+  {
+    auto input_mask_handle = cuda_buffer_backend::from_input_buffer(mask->data, *cuda_stream_);
+    auto input_img_handle = cuda_buffer_backend::from_input_buffer(img->data, *cuda_stream_);
+    auto output_write_handle =
+      cuda_buffer_backend::from_output_buffer(output_msg->data, *cuda_stream_);
+    const uint8_t * input_mask = input_mask_handle.get_ptr();
+    const uint8_t * input_img = input_img_handle.get_ptr();
+    uint8_t * output_image = output_write_handle.get_ptr();
 
-  output_msg->timestamp_sec = img->timestamp_sec;
-  output_msg->timestamp_nsec = img->timestamp_nsec;
-  output_msg->frame_id = img->frame_id;
+    AlphaBlend(
+      output_image, input_mask, input_img,
+      width, height, alpha_, is_mono, *cuda_stream_);
+    CHECK_CUDA_ERROR(cudaGetLastError(), "Failed to execute alpha blending");
+    CHECK_CUDA_ERROR(cudaStreamSynchronize(*cuda_stream_), "Failed to synchronize CUDA stream");
+  }
 
   // Publish output image
   image_pub_->publish(std::move(output_msg));

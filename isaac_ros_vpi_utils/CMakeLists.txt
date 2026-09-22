@@ -43,8 +43,7 @@ if(BUILD_TESTING)
 
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(vpi_utilities_test test/vpi_utilities_test.cpp)
-  target_link_libraries(vpi_utilities_test ${PROJECT_NAME})
-  ament_target_dependencies(vpi_utilities_test rclcpp)
+  target_link_libraries(vpi_utilities_test ${PROJECT_NAME} ${rclcpp_TARGETS})
 endif()
 
 

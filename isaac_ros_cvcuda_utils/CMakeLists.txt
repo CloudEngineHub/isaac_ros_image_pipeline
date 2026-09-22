@@ -41,21 +41,8 @@ if(BUILD_TESTING)
   ament_lint_auto_find_test_dependencies()
   find_package(launch_testing_ament_cmake REQUIRED)
 
-  # GTest for CVCUDATensorHandle
-  find_package(ament_cmake_gtest REQUIRED)
-  ament_add_gtest(cvcuda_handle_test test/cvcuda_handle_test.cpp)
-  target_link_libraries(cvcuda_handle_test
-    ${PROJECT_NAME}
-    cvcuda
-    nvcv_types
-    CUDA::cudart
-  )
-  ament_target_dependencies(cvcuda_handle_test
-    isaac_ros_nitros
-    isaac_ros_nitros_image_type
-  )
-
   # GTest for CVCUDA utilities (ToNVCVFormat, ToNVCVInterpolationType)
+  find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(cvcuda_utilities_test test/cvcuda_utilities_test.cpp)
   target_link_libraries(cvcuda_utilities_test
     ${PROJECT_NAME}

@@ -24,6 +24,9 @@ endif()
 
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
+find_package(CUDAToolkit REQUIRED)
+
+find_package(vpi REQUIRED)
 
 # PointCloudNode
 set_source_files_properties(src/point_cloud_cuda.cu.cpp PROPERTIES LANGUAGE CUDA)
@@ -34,6 +37,9 @@ ament_auto_add_library(point_cloud_node SHARED
 
 rclcpp_components_register_nodes(point_cloud_node "nvidia::isaac_ros::stereo_image_proc::PointCloudNode")
 set(node_plugins "${node_plugins}nvidia::isaac_ros::stereo_image_proc::PointCloudNode;$<TARGET_FILE:point_cloud_node>\n")
+target_link_libraries(point_cloud_node
+  CUDA::cudart
+)
 set_target_properties(point_cloud_node PROPERTIES
   BUILD_WITH_INSTALL_RPATH TRUE
   BUILD_RPATH_USE_ORIGIN TRUE
@@ -41,6 +47,7 @@ set_target_properties(point_cloud_node PROPERTIES
 
 # DisparityNode
 ament_auto_add_library(disparity_node SHARED src/disparity_node.cpp)
+target_link_libraries(disparity_node vpi)
 rclcpp_components_register_nodes(disparity_node "nvidia::isaac_ros::stereo_image_proc::DisparityNode")
 set(node_plugins "${node_plugins}nvidia::isaac_ros::stereo_image_proc::DisparityNode;$<TARGET_FILE:disparity_node>\n")
 set_target_properties(disparity_node PROPERTIES
@@ -54,9 +61,13 @@ ament_auto_add_library(disparity_to_depth_node SHARED
   src/disparity_to_depth.cu.cpp
 )
 set_source_files_properties(src/disparity_to_depth.cu.cpp PROPERTIES LANGUAGE CUDA)
+target_link_libraries(disparity_to_depth_node vpi)
 # CUDA runtime is linked automatically by nvcc when compiling CUDA sources
 rclcpp_components_register_nodes(disparity_to_depth_node "nvidia::isaac_ros::stereo_image_proc::DisparityToDepthNode")
 set(node_plugins "${node_plugins}nvidia::isaac_ros::stereo_image_proc::DisparityToDepthNode;$<TARGET_FILE:disparity_to_depth_node>\n")
+target_link_libraries(disparity_to_depth_node
+  CUDA::cudart
+)
 set_target_properties(disparity_to_depth_node PROPERTIES
   BUILD_WITH_INSTALL_RPATH TRUE
   BUILD_RPATH_USE_ORIGIN TRUE

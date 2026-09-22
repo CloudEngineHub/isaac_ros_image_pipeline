@@ -25,8 +25,7 @@
 #include "cvcuda/OpCopyMakeBorder.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "isaac_ros_common/cuda_stream.hpp"
-#include "isaac_ros_nitros_image_type/nitros_image.hpp"
-#include "isaac_ros_nitros/types/cuda_memory_pool.hpp"
+#include "sensor_msgs/msg/image.hpp"
 #include "nvcv/BorderType.h"
 
 namespace nvidia
@@ -55,17 +54,17 @@ public:
   PadNode & operator=(const PadNode &) = delete;
 
 private:
-  void imageSubCallback(const nvidia::isaac_ros::nitros::NitrosImage::SharedPtr msg);
+  void imageSubCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg);
 
   // QoS settings
   rclcpp::QoS input_qos_;
   rclcpp::QoS output_qos_;
 
-  // Subscription to input NitrosImage messages
-  rclcpp::Subscription<nvidia::isaac_ros::nitros::NitrosImage>::SharedPtr image_sub_;
+  // Subscription to input image messages
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
 
-  // Publisher for output NitrosImage messages
-  rclcpp::Publisher<nvidia::isaac_ros::nitros::NitrosImage>::SharedPtr image_pub_;
+  // Publisher for output image messages
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
 
   // Pad node parameters
   const uint16_t output_image_width_;
@@ -75,14 +74,11 @@ private:
   // Param to store the channel values for each pixel for border.
   // Needed for CENTER CONSTANT padding
   const std::vector<double> border_pixel_color_value_;
-  const int64_t memory_pool_block_size_;
-  const int64_t memory_pool_num_blocks_;
 
   PaddingType padding_type_val_;
   NVCVBorderType border_type_val_;
   std::vector<float> border_values_float_;
   ::nvidia::isaac_ros::common::CudaStreamPtr cuda_stream_;
-  nvidia::isaac_ros::nitros::CUDAMemoryPool pool_;
 
   // Pad node CVCUDA operation
   cvcuda::CopyMakeBorder make_border_op_;

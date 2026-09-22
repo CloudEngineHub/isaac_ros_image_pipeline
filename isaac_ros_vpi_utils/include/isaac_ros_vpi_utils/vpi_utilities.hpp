@@ -65,9 +65,9 @@ struct VPIFormat
 };
 
 /**
-  * @brief Convert a NitrosImage format into VPI format
+  * @brief Convert an image encoding into VPI format
   *
-  * @param value Input NitrosImage format
+  * @param encoding Input image encoding
   * @return VPIFormat Resulting VPIFormat
   */
 VPIFormat ToVpiFormat(const std::string & encoding);

@@ -18,17 +18,15 @@
 #ifndef ISAAC_ROS_IMAGE_PROC__ALPHA_BLEND_NODE_HPP_
 #define ISAAC_ROS_IMAGE_PROC__ALPHA_BLEND_NODE_HPP_
 
-#include <message_filters/subscriber.h>
-#include <message_filters/synchronizer.h>
-#include <message_filters/sync_policies/exact_time.h>
-
 #include <memory>
+
+#include <message_filters/subscriber.hpp>
+#include <message_filters/synchronizer.hpp>
+#include <message_filters/sync_policies/exact_time.hpp>
 
 #include "isaac_ros_common/cuda_stream.hpp"
 #include "isaac_ros_image_proc/alpha_blend.cu.hpp"
-#include "isaac_ros_nitros/types/cuda_memory_pool.hpp"
-#include "isaac_ros_nitros/types/nitros_type_message_filter_traits.hpp"
-#include "isaac_ros_nitros_image_type/nitros_image.hpp"
+#include "sensor_msgs/msg/image.hpp"
 #include "rclcpp/rclcpp.hpp"
 
 namespace nvidia
@@ -48,29 +46,26 @@ public:
 private:
   // Callback function
   void InputCallback(
-    const nvidia::isaac_ros::nitros::NitrosImage::ConstSharedPtr & img_ptr,
-    const nvidia::isaac_ros::nitros::NitrosImage::ConstSharedPtr & mask_ptr);
+    const sensor_msgs::msg::Image::ConstSharedPtr & img_ptr,
+    const sensor_msgs::msg::Image::ConstSharedPtr & mask_ptr);
 
   // Alpha blend node parameters
   double alpha_;
-  int memory_pool_block_size_;
-  int memory_pool_num_blocks_;
   int64_t input_queue_size_;
   int64_t output_queue_size_;
 
   // Subscribers and publishers
-  message_filters::Subscriber<nvidia::isaac_ros::nitros::NitrosImage> image_sub_;
-  message_filters::Subscriber<nvidia::isaac_ros::nitros::NitrosImage> mask_sub_;
-  rclcpp::Publisher<nvidia::isaac_ros::nitros::NitrosImage>::SharedPtr image_pub_;
+  message_filters::Subscriber<sensor_msgs::msg::Image> image_sub_;
+  message_filters::Subscriber<sensor_msgs::msg::Image> mask_sub_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
 
   // Exact message sync policy
   using ExactPolicy = ::message_filters::sync_policies::ExactTime<
-    nvidia::isaac_ros::nitros::NitrosImage, nvidia::isaac_ros::nitros::NitrosImage>;
+    sensor_msgs::msg::Image, sensor_msgs::msg::Image>;
   message_filters::Synchronizer<ExactPolicy> sync_;
 
   // Resources
   ::nvidia::isaac_ros::common::CudaStreamPtr cuda_stream_;
-  nvidia::isaac_ros::nitros::CUDAMemoryPool pool_;
 };
 
 }  // namespace image_proc
