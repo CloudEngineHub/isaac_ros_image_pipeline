@@ -67,10 +67,10 @@ def generate_launch_description():
         namespace='',
         executable='component_container_mt',
         composable_node_descriptions=IsaacROSDisparityLaunchFragment
-        .get_composable_nodes().values(),
+        .get_composable_nodes({}).values(),
         output='screen'
     )
 
     return launch.LaunchDescription(
         [disparity_container] +
-        IsaacROSDisparityLaunchFragment.get_launch_actions().values())
+        list(IsaacROSDisparityLaunchFragment.get_launch_actions({}).values()))

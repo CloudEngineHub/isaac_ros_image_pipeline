@@ -45,10 +45,10 @@ def generate_launch_description():
         namespace='',
         executable='component_container_mt',
         composable_node_descriptions=IsaacROSPointCloudLaunchFragment
-        .get_composable_nodes().values(),
+        .get_composable_nodes({}).values(),
         output='screen'
     )
 
     return launch.LaunchDescription(
         [point_cloud_container] +
-        IsaacROSPointCloudLaunchFragment.get_launch_actions().values())
+        list(IsaacROSPointCloudLaunchFragment.get_launch_actions({}).values()))

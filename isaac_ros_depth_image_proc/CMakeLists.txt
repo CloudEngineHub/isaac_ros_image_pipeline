@@ -88,7 +88,10 @@ ament_auto_add_library(align_depth_to_color_node SHARED
   src/align_depth_to_color_node.cpp
   src/align_depth_to_color_node.cu)
 target_include_directories(align_depth_to_color_node PUBLIC ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(align_depth_to_color_node Eigen3::Eigen ${OpenCV_LIBS})
+target_link_libraries(align_depth_to_color_node
+  Eigen3::Eigen
+  ${OpenCV_LIBS}
+)
 rclcpp_components_register_nodes(align_depth_to_color_node "nvidia::isaac_ros::depth_image_proc::AlignDepthToColorNode")
 set(node_plugins "${node_plugins}nvidia::isaac_ros::depth_image_proc::AlignDepthToColorNode;$<TARGET_FILE:align_depth_to_color_node>\n")
 set_target_properties(align_depth_to_color_node PROPERTIES
@@ -126,4 +129,4 @@ ament_index_get_resource(ISAAC_ROS_COMMON_CMAKE_PATH isaac_ros_common_cmake_path
 include("${ISAAC_ROS_COMMON_CMAKE_PATH}/isaac_ros_common-version-info.cmake")
 generate_version_info(${PROJECT_NAME})
 
-ament_auto_package(INSTALL_TO_SHARE launch config)
+ament_auto_package(INSTALL_TO_SHARE launch)

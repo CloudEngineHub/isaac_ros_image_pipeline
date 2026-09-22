@@ -18,13 +18,14 @@
 #include "isaac_ros_depth_image_proc/point_cloud_xyz_node.hpp"
 
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
 
+#include "cuda_buffer/cuda_buffer_api.hpp"
 #include "isaac_ros_common/qos.hpp"
-#include "isaac_ros_nitros_image_type/nitros_image.hpp"
-#include "isaac_ros_nitros_point_cloud_type/nitros_point_cloud.hpp"
+#include "pointcloud_conversions/pointcloud_conversions.hpp"
 #include "rclcpp/rclcpp.hpp"
 
 namespace nvidia
@@ -33,13 +34,14 @@ namespace isaac_ros
 {
 namespace depth_image_proc
 {
+
+namespace PcConv = pointcloud_conversions;
+
 PointCloudXyzNode::PointCloudXyzNode(const rclcpp::NodeOptions & options)
 : rclcpp::Node("PointCloudXyzNode", options),
   skip_(declare_parameter<int>("skip", 1)),
   output_height_(declare_parameter<uint16_t>("output_height", 1200)),
   output_width_(declare_parameter<uint16_t>("output_width", 1920)),
-  memory_pool_block_size_(declare_parameter<int64_t>("memory_pool_block_size", 1920 * 1200 * 4)),
-  memory_pool_num_blocks_(declare_parameter<int64_t>("memory_pool_num_blocks", 40)),
   input_qos_size_(declare_parameter<int32_t>("input_qos_size", 10)),
   output_qos_size_(declare_parameter<int32_t>("output_qos_size", 10)),
   depth_sub_{},
@@ -49,40 +51,31 @@ PointCloudXyzNode::PointCloudXyzNode(const rclcpp::NodeOptions & options)
 {
   RCLCPP_DEBUG(get_logger(), "[PointCloudXyzNode] Constructor");
 
-  // Create CUDA stream
   cuda_stream_ = ::nvidia::isaac_ros::common::createCudaStream("PointCloudXyzNode");
-
-  CHECK_CUDA_ERROR(pool_.create(
-    static_cast<size_t>(memory_pool_block_size_),
-    static_cast<size_t>(memory_pool_num_blocks_),
-    nvidia::isaac_ros::nitros::CUDAMemoryPool::MemoryType::Device),
-    "[PointCloudXyzNode] Failed to create CUDA memory pool");
 
   if (skip_ < 1) {
     RCLCPP_ERROR(get_logger(), "skip must be strictly positive, %d was provided", skip_);
     throw std::invalid_argument("skip must be strictly positive");
   }
 
-  // Subscribers
   const rclcpp::QoS input_qos = ::isaac_ros::common::AddQosParameter(
     *this, "DEFAULT", "input_qos").keep_last(input_qos_size_);
   const rclcpp::QoS output_qos = ::isaac_ros::common::AddQosParameter(
     *this, "DEFAULT", "output_qos").keep_last(output_qos_size_);
-  const rmw_qos_profile_t rmw_qos_profile = input_qos.get_rmw_qos_profile();
 
   rclcpp::SubscriptionOptions sub_options;
   sub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
+  sub_options.acceptable_buffer_backends = "any";
   rclcpp::PublisherOptions pub_options;
   pub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
 
   exact_sync_.registerCallback(std::bind(&PointCloudXyzNode::OnSynchronizedInputs, this,
     std::placeholders::_1, std::placeholders::_2));
 
-  depth_sub_.subscribe(this, "image_rect", rmw_qos_profile, sub_options);
-  camera_info_sub_.subscribe(this, "camera_info", rmw_qos_profile, sub_options);
+  depth_sub_.subscribe(this, "image_rect", input_qos, sub_options);
+  camera_info_sub_.subscribe(this, "camera_info", input_qos, sub_options);
 
-  // Publisher
-  point_cloud_pub_ = create_publisher<nvidia::isaac_ros::nitros::NitrosPointCloud>(
+  point_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
     "points", output_qos, pub_options);
 
   camera_info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>(
@@ -93,17 +86,18 @@ PointCloudXyzNode::PointCloudXyzNode(const rclcpp::NodeOptions & options)
 
 PointCloudXyzNode::~PointCloudXyzNode() {}
 
-
 PointCloudProperties PointCloudXyzNode::CreatePointCloudProperties(
+  const sensor_msgs::msg::PointCloud2 & point_cloud_msg,
   const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info_msg,
   const int skip)
 {
   PointCloudProperties point_cloud_properties;
+  const unsigned int floats_per_point =
+    point_cloud_msg.point_step / static_cast<unsigned int>(sizeof(float));
 
-  const int point_step = 3;
   point_cloud_properties.n_points = camera_info_msg->height *
     camera_info_msg->width / skip;
-  point_cloud_properties.point_step = point_step;
+  point_cloud_properties.point_step = floats_per_point;
   point_cloud_properties.x_offset = 0;
   point_cloud_properties.y_offset = 1;
   point_cloud_properties.z_offset = 2;
@@ -133,50 +127,40 @@ DepthProperties PointCloudXyzNode::CreateDepthProperties(
 }
 
 void PointCloudXyzNode::OnSynchronizedInputs(
-  const nvidia::isaac_ros::nitros::NitrosImage::ConstSharedPtr & depth_msg,
+  const sensor_msgs::msg::Image::ConstSharedPtr & depth_msg,
   const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info_msg)
 {
   RCLCPP_DEBUG(get_logger(), "[PointCloudXyzNode] OnSynchronizedInputs");
 
-  // Get read handles from input messages
-  auto depth_read_handle = depth_msg->get_read_handle(*cuda_stream_);
-  const float * depth_ptr = reinterpret_cast<const float *>(depth_read_handle.get_ptr());
+  const uint32_t n_points = camera_info_msg->height * camera_info_msg->width / skip_;
+  auto point_cloud_msg = PcConv::allocate_point_cloud_msg(n_points, 1, /*use_color=*/false);
+  point_cloud_msg->header = depth_msg->header;
 
-  // create output point cloud message
-  PointCloudProperties point_cloud_properties = CreatePointCloudProperties(camera_info_msg, skip_);
-  DepthProperties depth_properties = CreateDepthProperties(camera_info_msg);
+  {
+    auto depth_read_handle = cuda_buffer_backend::from_input_buffer(
+      depth_msg->data, *cuda_stream_);
+    const float * depth_ptr = reinterpret_cast<const float *>(depth_read_handle.get_ptr());
 
-  nvidia::isaac_ros::nitros::NitrosPointCloud point_cloud_msg;
-  uint32_t width = point_cloud_properties.n_points;
-  uint32_t height = 1;
-  uint32_t point_step = point_cloud_properties.point_step * sizeof(float);
-  uint32_t row_step = width * point_step;
-  auto point_cloud_write_handle = point_cloud_msg.from_pool(
-    pool_, width, height, point_step, row_step, false, false, *cuda_stream_);
-  float * point_cloud_ptr = reinterpret_cast<float *>(point_cloud_write_handle.get_ptr());
+    auto point_cloud_write_handle = PcConv::from_output_point_cloud_msg(
+      *point_cloud_msg, *cuda_stream_);
+    float * point_cloud_ptr = reinterpret_cast<float *>(point_cloud_write_handle.get_ptr());
 
-  // Compute the point cloud
-  cloud_compute_.DepthToPointCloudCuda(
-    depth_ptr,
-    nullptr,
-    point_cloud_ptr,
-    point_cloud_properties,
-    depth_properties,
-    false,
-    skip_,
-    *cuda_stream_);
+    PointCloudProperties point_cloud_properties = CreatePointCloudProperties(
+      *point_cloud_msg, camera_info_msg, skip_);
+    DepthProperties depth_properties = CreateDepthProperties(camera_info_msg);
 
-  point_cloud_msg.width = width;
-  point_cloud_msg.height = height;
-  point_cloud_msg.point_step = point_step;
-  point_cloud_msg.row_step = row_step;
-  point_cloud_msg.is_bigendian = false;
-  point_cloud_msg.frame_id = depth_msg->frame_id;
-  point_cloud_msg.timestamp_sec = depth_msg->timestamp_sec;
-  point_cloud_msg.timestamp_nsec = depth_msg->timestamp_nsec;
+    cloud_compute_.DepthToPointCloudCuda(
+      depth_ptr,
+      nullptr,
+      point_cloud_ptr,
+      point_cloud_properties,
+      depth_properties,
+      false,
+      skip_,
+      *cuda_stream_);
+  }
 
-  // Publish the point cloud message
-  point_cloud_pub_->publish(point_cloud_msg);
+  point_cloud_pub_->publish(std::move(point_cloud_msg));
   camera_info_pub_->publish(*camera_info_msg);
 }
 

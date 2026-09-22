@@ -58,102 +58,77 @@ def generate_test_description():
 
     transform_publishers = []
 
+    def static_tf(name, xyz, quat, frame_id, child_frame_id):
+        # The lyrical distro's static_transform_publisher requires named flags;
+        # bare positional args parse into empty frame ids ("Frame id must not be
+        # empty") and the process exits.
+        return Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name=name,
+            arguments=[
+                '--x', xyz[0], '--y', xyz[1], '--z', xyz[2],
+                '--qx', quat[0], '--qy', quat[1], '--qz', quat[2], '--qw', quat[3],
+                '--frame-id', frame_id, '--child-frame-id', child_frame_id,
+            ]
+        )
+
     # 1. world -> camera_1_link
-    transform_publishers.append(Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='world_to_camera_link',
-        arguments=[
-            '-1.15538', '-0.104895', '0.283619',
-            '-0.158406', '0.312276', '0.531243', '0.771474',
-            'world', 'camera_1_link'
-        ]
-    ))
+    transform_publishers.append(static_tf(
+        'world_to_camera_link',
+        ['-1.15538', '-0.104895', '0.283619'],
+        ['-0.158406', '0.312276', '0.531243', '0.771474'],
+        'world', 'camera_1_link'))
 
     # 2. camera_1_link -> camera_1_infra1_frame (identity)
-    transform_publishers.append(Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='camera_link_to_infra1_frame',
-        arguments=[
-            '0.0', '0.0', '0.0',
-            '0.0', '0.0', '0.0', '1.0',
-            'camera_1_link', 'camera_1_infra1_frame'
-        ]
-    ))
+    transform_publishers.append(static_tf(
+        'camera_link_to_infra1_frame',
+        ['0.0', '0.0', '0.0'],
+        ['0.0', '0.0', '0.0', '1.0'],
+        'camera_1_link', 'camera_1_infra1_frame'))
 
     # 3. camera_1_link -> camera_1_aligned_depth_to_infra1_frame (identity)
-    transform_publishers.append(Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='camera_link_to_aligned_depth_frame',
-        arguments=[
-            '0.0', '0.0', '0.0',
-            '0.0', '0.0', '0.0', '1.0',
-            'camera_1_link', 'camera_1_aligned_depth_to_infra1_frame'
-        ]
-    ))
+    transform_publishers.append(static_tf(
+        'camera_link_to_aligned_depth_frame',
+        ['0.0', '0.0', '0.0'],
+        ['0.0', '0.0', '0.0', '1.0'],
+        'camera_1_link', 'camera_1_aligned_depth_to_infra1_frame'))
 
     # 4. camera_1_aligned_depth_to_infra1_frame -> camera_1_infra1_optical_frame
-    transform_publishers.append(Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='aligned_depth_to_infra1_optical',
-        arguments=[
-            '0.0', '0.0', '0.0',
-            '-0.5', '0.4999999999999999', '-0.5', '0.5000000000000001',
-            'camera_1_aligned_depth_to_infra1_frame', 'camera_1_infra1_optical_frame'
-        ]
-    ))
+    transform_publishers.append(static_tf(
+        'aligned_depth_to_infra1_optical',
+        ['0.0', '0.0', '0.0'],
+        ['-0.5', '0.4999999999999999', '-0.5', '0.5000000000000001'],
+        'camera_1_aligned_depth_to_infra1_frame', 'camera_1_infra1_optical_frame'))
 
     # 5. camera_1_link -> camera_1_infra2_frame
-    transform_publishers.append(Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='camera_link_to_infra2_frame',
-        arguments=[
-            '0.0', '-0.049997858703136444', '0.0',
-            '0.0', '0.0', '0.0', '1.0',
-            'camera_1_link', 'camera_1_infra2_frame'
-        ]
-    ))
+    transform_publishers.append(static_tf(
+        'camera_link_to_infra2_frame',
+        ['0.0', '-0.049997858703136444', '0.0'],
+        ['0.0', '0.0', '0.0', '1.0'],
+        'camera_1_link', 'camera_1_infra2_frame'))
 
     # 6. camera_1_infra2_frame -> camera_1_infra2_optical_frame
-    transform_publishers.append(Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='infra2_frame_to_optical',
-        arguments=[
-            '0.0', '0.0', '0.0',
-            '-0.5', '0.4999999999999999', '-0.5', '0.5000000000000001',
-            'camera_1_infra2_frame', 'camera_1_infra2_optical_frame'
-        ]
-    ))
+    transform_publishers.append(static_tf(
+        'infra2_frame_to_optical',
+        ['0.0', '0.0', '0.0'],
+        ['-0.5', '0.4999999999999999', '-0.5', '0.5000000000000001'],
+        'camera_1_infra2_frame', 'camera_1_infra2_optical_frame'))
 
     # 7. camera_1_link -> camera_1_color_frame
-    transform_publishers.append(Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='camera_link_to_color_frame',
-        arguments=[
-            '-0.00021917633421253413', '0.014781120233237743', '-8.353878365596756e-05',
-            '-0.0038682855665683746', '0.0017180306604132056', '0.005697885062545538',
-            '0.99997478723526',
-            'camera_1_link', 'camera_1_color_frame'
-        ]
-    ))
+    transform_publishers.append(static_tf(
+        'camera_link_to_color_frame',
+        ['-0.00021917633421253413', '0.014781120233237743', '-8.353878365596756e-05'],
+        ['-0.0038682855665683746', '0.0017180306604132056', '0.005697885062545538',
+         '0.99997478723526'],
+        'camera_1_link', 'camera_1_color_frame'))
 
     # 8. camera_1_color_frame -> camera_1_color_optical_frame
-    transform_publishers.append(Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='color_frame_to_optical',
-        arguments=[
-            '0.0', '0.0', '0.0',
-            '-0.5', '0.4999999999999999', '-0.5', '0.5000000000000001',
-            'camera_1_color_frame', 'camera_1_color_optical_frame'
-        ]
-    ))
+    transform_publishers.append(static_tf(
+        'color_frame_to_optical',
+        ['0.0', '0.0', '0.0'],
+        ['-0.5', '0.4999999999999999', '-0.5', '0.5000000000000001'],
+        'camera_1_color_frame', 'camera_1_color_optical_frame'))
 
     all_nodes = [container] + transform_publishers
 

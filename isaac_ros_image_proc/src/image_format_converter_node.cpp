@@ -25,16 +25,13 @@
 #include <utility>
 
 #include "cvcuda/OpCvtColor.hpp"
+#include "cuda_buffer/cuda_buffer_api.hpp"
 #include "isaac_ros_common/cuda_stream.hpp"
 #include "isaac_ros_common/qos.hpp"
 #include "isaac_ros_cvcuda_utils/cvcuda_utilities.hpp"
-#include "isaac_ros_nitros_image_type/nitros_image.hpp"
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/image_encodings.hpp"
-
-using nvidia::isaac_ros::nitros::NitrosImage;
-using nvidia::isaac_ros::nitros::CUDAMemoryPool;
 
 namespace nvidia
 {
@@ -44,21 +41,6 @@ namespace image_proc
 {
 namespace
 {
-int bytesPerPixel(const std::string & encoding)
-{
-  try {
-    return sensor_msgs::image_encodings::numChannels(encoding) *
-           (sensor_msgs::image_encodings::bitDepth(encoding) / CHAR_BIT);
-  } catch (const std::runtime_error &) {
-    RCLCPP_WARN(
-      rclcpp::get_logger("ImageFormatConverterNode"),
-      "Unrecognized encoding '%s'; using 4 bpp for pool sizing. "
-      "Check encoding_desired parameter.",
-      encoding.c_str());
-    return 4;
-  }
-}
-
 // As of writing, CV-CUDA 0.14 AdvCvtColor only accepts {BT601, BT709, BT2020} in
 // limited range; the full-range (_ER) enumerants exist in nvcv/ColorSpec.h
 // but are rejected at the operator's isSupportedColorSpec() gate.
@@ -91,113 +73,68 @@ NVCVColorSpec ImageFormatConverterNode::ParseYuvColorSpec(const std::string & na
   return it->second;
 }
 
-// Pool block size is computed automatically from image_width, image_height, and encoding_desired.
-// Set image_width and image_height to match your camera resolution; memory_pool_block_size
-// can be omitted unless you need an explicit override.
 ImageFormatConverterNode::ImageFormatConverterNode(const rclcpp::NodeOptions & options)
 : rclcpp::Node("image_format_converter_node", options),
   encoding_desired_(declare_parameter<std::string>("encoding_desired", "rgb8")),
   image_width_(declare_parameter<int32_t>("image_width", 1920)),
   image_height_(declare_parameter<int32_t>("image_height", 1200)),
-  memory_pool_block_size_(declare_parameter<int64_t>("memory_pool_block_size",
-    static_cast<int64_t>(image_width_) * image_height_ * bytesPerPixel(encoding_desired_))),
-  memory_pool_num_blocks_(declare_parameter<int64_t>("memory_pool_num_blocks", 40)),
   yuv_color_spec_(ParseYuvColorSpec(
       declare_parameter<std::string>("yuv_color_spec", kDefaultYuvColorSpec))),
   input_qos_(::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "input_qos", 10)),
   output_qos_(::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "output_qos", 10))
 {
-  RCLCPP_INFO(get_logger(),
-    "[ImageFormatConverterNode] Pool sized from image_width=%d, image_height=%d, "
-    "encoding=%s: block_size=%ld bytes (%ld blocks)",
-    image_width_, image_height_, encoding_desired_.c_str(),
-    memory_pool_block_size_, memory_pool_num_blocks_);
-
   if (image_width_ <= 0 || image_height_ <= 0) {
     RCLCPP_ERROR(get_logger(),
       "image_width (%d) and image_height (%d) must be positive",
       image_width_, image_height_);
     throw std::invalid_argument("image_width and image_height must be positive");
   }
-  if (memory_pool_block_size_ <= 0) {
-    RCLCPP_ERROR(get_logger(),
-      "memory_pool_block_size (%ld) must be positive", memory_pool_block_size_);
-    throw std::invalid_argument("memory_pool_block_size must be positive");
-  }
-  if (memory_pool_num_blocks_ <= 0) {
-    RCLCPP_ERROR(get_logger(),
-      "memory_pool_num_blocks (%ld) must be positive", memory_pool_num_blocks_);
-    throw std::invalid_argument("memory_pool_num_blocks must be positive");
-  }
 
   // check if the encoding is supported. Multiplanar outputs (e.g. nv12) are not in
   // the packed-format table, so validate them separately and skip the packed check.
   if (!encoding_desired_.empty() && !cvcuda_utils::IsMultiplanarEncoding(encoding_desired_)) {
-    try {
-      const cvcuda_utils::NVCVImageFormat format = cvcuda_utils::ToNVCVFormat(encoding_desired_);
-    } catch (const std::invalid_argument & e) {
-      RCLCPP_ERROR(get_logger(), "Unsupported encoding: %s", encoding_desired_.c_str());
-      throw std::invalid_argument("Unsupported encoding: " + encoding_desired_);
-    }
+    cvcuda_utils::ToNVCVFormat(encoding_desired_);
   }
 
   cuda_stream_ = ::nvidia::isaac_ros::common::createCudaStream("ImageFormatConverterNode");
 
-  // Create CUDA memory pool
-  cudaError_t err = pool_.create(
-    static_cast<size_t>(memory_pool_block_size_),
-    static_cast<size_t>(memory_pool_num_blocks_),
-    CUDAMemoryPool::MemoryType::Device);
-  if (err != cudaSuccess) {
-    RCLCPP_ERROR(get_logger(), "Failed to create CUDA memory pool: %s", cudaGetErrorString(err));
-    throw std::runtime_error("Failed to create CUDA memory pool");
-  }
   // Subscription options
   rclcpp::SubscriptionOptions sub_options;
   sub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
+  // Accept GPU-backed image buffers; from_input_buffer promotes CPU buffers as needed.
+  sub_options.acceptable_buffer_backends = "any";
   // Publisher options
   rclcpp::PublisherOptions pub_options;
   pub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
 
   // Create subscribers and publishers
-  image_sub_ = create_subscription<NitrosImage>(
+  image_sub_ = create_subscription<sensor_msgs::msg::Image>(
     "image_raw", input_qos_,
     std::bind(&ImageFormatConverterNode::imageSubCallback, this, std::placeholders::_1),
     sub_options);
-  image_pub_ = create_publisher<NitrosImage>(
+  image_pub_ = create_publisher<sensor_msgs::msg::Image>(
     "image", output_qos_, pub_options);
 }
 
 ImageFormatConverterNode::~ImageFormatConverterNode() {}
 
-std::pair<std::unique_ptr<NitrosImage>, OutputTensorHandle>
-ImageFormatConverterNode::allocateOutput(const NitrosImage & msg)
+std::unique_ptr<sensor_msgs::msg::Image>
+ImageFormatConverterNode::allocateOutput(const sensor_msgs::msg::Image & msg)
 {
-  int num_channels = sensor_msgs::image_encodings::numChannels(encoding_desired_);
-  int bpc = sensor_msgs::image_encodings::bitDepth(encoding_desired_) / CHAR_BIT;
-  size_t output_step = static_cast<size_t>(num_channels) * bpc * msg.width;
-
-  auto output_msg = std::make_unique<NitrosImage>();
-  auto write_handle = output_msg->from_pool(
-    pool_, msg.width, msg.height, output_step, encoding_desired_, *cuda_stream_);
-
-  const cvcuda_utils::NVCVImageFormat output_format = cvcuda_utils::ToNVCVFormat(encoding_desired_);
-  auto output_handle = cvcuda_utils::WrapCVCUDATensor(
-    *output_msg, std::move(write_handle), output_format.format, num_channels, bpc);
-
-  return {std::move(output_msg), std::move(output_handle)};
+  auto output_msg = cvcuda_conversions::allocate_image_msg(
+    msg.width, msg.height, encoding_desired_);
+  output_msg->header = msg.header;
+  return output_msg;
 }
 
 void ImageFormatConverterNode::publishOutput(
-  std::unique_ptr<NitrosImage> output_msg, const NitrosImage & input_msg)
+  std::unique_ptr<sensor_msgs::msg::Image> output_msg, const sensor_msgs::msg::Image & input_msg)
 {
-  output_msg->timestamp_sec = input_msg.timestamp_sec;
-  output_msg->timestamp_nsec = input_msg.timestamp_nsec;
-  output_msg->frame_id = input_msg.frame_id;
+  output_msg->header = input_msg.header;
   image_pub_->publish(std::move(output_msg));
 }
 
-void ImageFormatConverterNode::imageSubCallback(const NitrosImage::SharedPtr msg)
+void ImageFormatConverterNode::imageSubCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg)
 {
   auto input_encoding = msg->encoding;
 
@@ -232,14 +169,9 @@ void ImageFormatConverterNode::imageSubCallback(const NitrosImage::SharedPtr msg
             "Unsupported conversion to nv12 from input encoding: " + input_encoding);
   }
 
-  // Packed-format path (rgb8, bgr8, mono8, etc.)
-  cvcuda_utils::NVCVImageFormat input_format;
-  try {
-    input_format = cvcuda_utils::ToNVCVFormat(input_encoding);
-  } catch (const std::invalid_argument & e) {
-    RCLCPP_ERROR(get_logger(), "Unsupported input encoding: %s", input_encoding.c_str());
-    throw std::invalid_argument("Unsupported input encoding: " + input_encoding);
-  }
+  // Packed-format path (rgb8, bgr8, mono8, etc.). Validate the input encoding
+  // up front for a clear error; the converter derives the format internally.
+  cvcuda_utils::ToNVCVFormat(input_encoding);
 
   int num_channels{sensor_msgs::image_encodings::numChannels(input_encoding)};
   int bytes_per_channel = sensor_msgs::image_encodings::bitDepth(input_encoding) / CHAR_BIT;
@@ -247,21 +179,26 @@ void ImageFormatConverterNode::imageSubCallback(const NitrosImage::SharedPtr msg
     "[ImageFormatConverterNode] Input width: %d, height: %d, num_channels: %d,"
     "bytes_per_channel: %d",
     msg->width, msg->height, num_channels, bytes_per_channel);
-  auto input_handle = cvcuda_utils::WrapCVCUDATensor(
-    *msg, msg->get_read_handle(*cuda_stream_), input_format.format, num_channels,
-    bytes_per_channel);
 
-  auto [output_msg, output_handle] = allocateOutput(*msg);
+  auto output_msg = allocateOutput(*msg);
 
-  const auto conversion_code = cvcuda_utils::ToNVCVColorConversionCode(input_encoding,
-    encoding_desired_);
-  cvt_color_op_(*cuda_stream_, input_handle.get_tensor(), output_handle.get_tensor(),
-    conversion_code);
+  // Scope the tensors so the read/write CUDA events are recorded on the stream
+  // before the output message is published.
+  {
+    auto output_tensor =
+      cvcuda_conversions::from_output_image_msg(*output_msg, *cuda_stream_);
+    auto input_tensor = cvcuda_conversions::from_input_image_msg(*msg, *cuda_stream_);
+
+    const auto conversion_code = cvcuda_utils::ToNVCVColorConversionCode(input_encoding,
+      encoding_desired_);
+    cvt_color_op_(*cuda_stream_, input_tensor, output_tensor, conversion_code);
+  }
 
   publishOutput(std::move(output_msg), *msg);
 }
 
-void ImageFormatConverterNode::convertMultiplanar(const NitrosImage::SharedPtr & msg)
+void ImageFormatConverterNode::convertMultiplanar(
+  const sensor_msgs::msg::Image::ConstSharedPtr & msg)
 {
   if (msg->encoding != cvcuda_utils::kEncodingNV12) {
     RCLCPP_ERROR(get_logger(),
@@ -277,46 +214,57 @@ void ImageFormatConverterNode::convertMultiplanar(const NitrosImage::SharedPtr &
     // NV12 Y plane is already monochrome so we can just copy this to output as AdvCvtColor does
     // not support it. We special handle this because CV-CUDA does not expose an NV12->MONO8
     // conversion code.
-    auto read_handle = msg->get_read_handle(*cuda_stream_);
-    auto [output_msg, output_handle] = allocateOutput(*msg);
-    auto tensor_data =
-      output_handle.get_tensor().exportData<nvcv::TensorDataStridedCuda>();
-    if (tensor_data == nullptr) {
-      RCLCPP_ERROR(get_logger(), "NV12->MONO8 failed: could not export output tensor data");
-      throw std::runtime_error("NV12->MONO8 failed: could not export output tensor data");
-    }
-    cudaError_t err = cudaMemcpy2DAsync(
-      tensor_data->basePtr(),
-      output_msg->step,
-      read_handle.get_ptr(),
-      msg->step,
-      msg->width,
-      msg->height,
-      cudaMemcpyDeviceToDevice, *cuda_stream_);
-    if (err != cudaSuccess) {
-      RCLCPP_ERROR(get_logger(), "NV12->MONO8 cudaMemcpy2DAsync failed: %s",
-        cudaGetErrorString(err));
-      throw std::runtime_error(
-        std::string("NV12->MONO8 cudaMemcpy2DAsync failed: ") + cudaGetErrorString(err));
+    auto output_msg = allocateOutput(*msg);
+    {
+      auto output_tensor =
+        cvcuda_conversions::from_output_image_msg(*output_msg, *cuda_stream_);
+      auto read_handle = cuda_buffer_backend::from_input_buffer(msg->data, *cuda_stream_);
+      uint8_t * dst = cvcuda_conversions::tensor_base_ptr(output_tensor);
+      if (dst == nullptr) {
+        RCLCPP_ERROR(get_logger(), "NV12->MONO8 failed: could not access output tensor data");
+        throw std::runtime_error("NV12->MONO8 failed: could not access output tensor data");
+      }
+      cudaError_t err = cudaMemcpy2DAsync(
+        dst,
+        output_msg->step,
+        read_handle.get_ptr(),
+        msg->step,
+        msg->width,
+        msg->height,
+        cudaMemcpyDeviceToDevice, *cuda_stream_);
+      if (err != cudaSuccess) {
+        RCLCPP_ERROR(get_logger(), "NV12->MONO8 cudaMemcpy2DAsync failed: %s",
+          cudaGetErrorString(err));
+        throw std::runtime_error(
+          std::string("NV12->MONO8 cudaMemcpy2DAsync failed: ") + cudaGetErrorString(err));
+      }
     }
     publishOutput(std::move(output_msg), *msg);
     return;
   }
 
-  auto input_handle = cvcuda_utils::WrapCVCUDATensorNV12(
-    *msg, msg->get_read_handle(*cuda_stream_));
+  auto output_msg = allocateOutput(*msg);
 
-  auto [output_msg, output_handle] = allocateOutput(*msg);
+  // Scope the tensors so the read/write CUDA events are recorded on the stream
+  // before the output message is published.
+  {
+    auto output_tensor =
+      cvcuda_conversions::from_output_image_msg(*output_msg, *cuda_stream_);
+    // The converter maps the "nv12" encoding to a single Y8 tensor with the
+    // stacked H*3/2 layout that AdvCvtColor expects.
+    auto input_tensor = cvcuda_conversions::from_input_image_msg(*msg, *cuda_stream_);
 
-  const auto conversion_code = cvcuda_utils::GetNV12ConversionCode(encoding_desired_);
-  adv_cvt_color_op_(
-    *cuda_stream_, input_handle.get_tensor(), output_handle.get_tensor(),
-    conversion_code, yuv_color_spec_);
+    const auto conversion_code = cvcuda_utils::GetNV12ConversionCode(encoding_desired_);
+    adv_cvt_color_op_(
+      *cuda_stream_, input_tensor, output_tensor,
+      conversion_code, yuv_color_spec_);
+  }
 
   publishOutput(std::move(output_msg), *msg);
 }
 
-void ImageFormatConverterNode::convertMono8ToNV12(const NitrosImage::SharedPtr & msg)
+void ImageFormatConverterNode::convertMono8ToNV12(
+  const sensor_msgs::msg::Image::ConstSharedPtr & msg)
 {
   // mono8 luma maps directly onto the NV12 Y plane, so no color-space conversion is
   // needed: copy the input into the Y plane and fill the chroma plane with neutral
@@ -325,51 +273,58 @@ void ImageFormatConverterNode::convertMono8ToNV12(const NitrosImage::SharedPtr &
   RCLCPP_DEBUG(get_logger(),
     "[ImageFormatConverterNode] mono8 input: %dx%d -> nv12", msg->width, msg->height);
 
-  auto read_handle = msg->get_read_handle(*cuda_stream_);
-  const uint8_t * src = read_handle.get_ptr();
-  if (src == nullptr) {
-    RCLCPP_ERROR(get_logger(), "mono8->NV12 failed: input buffer pointer is null");
-    throw std::runtime_error("mono8->NV12 failed: input buffer pointer is null");
+  const uint32_t width = msg->width;
+  const uint32_t height = msg->height;
+  // 4:2:0 chroma subsampling requires even dimensions.
+  if (width % 2 != 0 || height % 2 != 0) {
+    RCLCPP_ERROR(get_logger(), "mono8->NV12 requires even width and height");
+    throw std::invalid_argument("mono8->NV12 requires even width and height");
   }
 
-  // Compact NV12 layout: the Y plane stride equals the width (1 byte/pixel luma).
-  // NitrosImage rejects odd dimensions for nv12, matching the 4:2:0 requirement.
-  auto output_msg = std::make_unique<NitrosImage>();
-  auto write_handle = output_msg->from_pool(
-    pool_, msg->width, msg->height, msg->width, cvcuda_utils::kEncodingNV12, *cuda_stream_);
-  uint8_t * dst = write_handle.get_ptr();
-  if (dst == nullptr) {
-    RCLCPP_ERROR(get_logger(), "mono8->NV12 failed: output buffer pointer is null");
-    throw std::runtime_error("mono8->NV12 failed: output buffer pointer is null");
-  }
+  // allocate_image_msg sizes NV12 with the stacked Y (H rows) + interleaved UV
+  // (H/2 rows) layout and sets step = width.
+  auto output_msg = cvcuda_conversions::allocate_image_msg(
+    width, height, cvcuda_utils::kEncodingNV12);
+  output_msg->header = msg->header;
+  const size_t y_stride = output_msg->step;
+  const size_t y_size = y_stride * height;
+  const size_t uv_stride = output_msg->step;
 
-  const auto & y_plane = output_msg->get_plane(0);
-  const auto & uv_plane = output_msg->get_plane(1);
+  {
+    auto read_handle = cuda_buffer_backend::from_input_buffer(msg->data, *cuda_stream_);
+    auto write_handle = cuda_buffer_backend::from_output_buffer(output_msg->data, *cuda_stream_);
+    const uint8_t * src = read_handle.get_ptr();
+    uint8_t * dst = write_handle.get_ptr();
+    if (src == nullptr || dst == nullptr) {
+      RCLCPP_ERROR(get_logger(), "mono8->NV12 failed: null buffer pointer");
+      throw std::runtime_error("mono8->NV12 failed: null buffer pointer");
+    }
 
-  // Copy the mono8 luma into the Y plane (honoring input/output row strides).
-  cudaError_t err = cudaMemcpy2DAsync(
-    dst + y_plane.offset, y_plane.stride,
-    src, msg->step,
-    msg->width, msg->height,
-    cudaMemcpyDeviceToDevice, *cuda_stream_);
-  if (err != cudaSuccess) {
-    RCLCPP_ERROR(get_logger(), "mono8->NV12 Y-plane cudaMemcpy2DAsync failed: %s",
-      cudaGetErrorString(err));
-    throw std::runtime_error(
-            std::string("mono8->NV12 Y-plane cudaMemcpy2DAsync failed: ") +
-            cudaGetErrorString(err));
-  }
+    // Copy the mono8 luma into the Y plane (honoring input/output row strides).
+    cudaError_t err = cudaMemcpy2DAsync(
+      dst, y_stride,
+      src, msg->step,
+      width, height,
+      cudaMemcpyDeviceToDevice, *cuda_stream_);
+    if (err != cudaSuccess) {
+      RCLCPP_ERROR(get_logger(), "mono8->NV12 Y-plane cudaMemcpy2DAsync failed: %s",
+        cudaGetErrorString(err));
+      throw std::runtime_error(
+              std::string("mono8->NV12 Y-plane cudaMemcpy2DAsync failed: ") +
+              cudaGetErrorString(err));
+    }
 
-  // Fill the interleaved UV plane with 0x80 (neutral chroma) for a true grayscale frame.
-  err = cudaMemset2DAsync(
-    dst + uv_plane.offset, uv_plane.stride,
-    0x80, static_cast<size_t>(uv_plane.width) * 2, uv_plane.height, *cuda_stream_);
-  if (err != cudaSuccess) {
-    RCLCPP_ERROR(get_logger(), "mono8->NV12 UV-plane cudaMemset2DAsync failed: %s",
-      cudaGetErrorString(err));
-    throw std::runtime_error(
-            std::string("mono8->NV12 UV-plane cudaMemset2DAsync failed: ") +
-            cudaGetErrorString(err));
+    // Fill the interleaved UV plane with 0x80 (neutral chroma) for a true grayscale frame.
+    err = cudaMemset2DAsync(
+      dst + y_size, uv_stride,
+      0x80, width, height / 2, *cuda_stream_);
+    if (err != cudaSuccess) {
+      RCLCPP_ERROR(get_logger(), "mono8->NV12 UV-plane cudaMemset2DAsync failed: %s",
+        cudaGetErrorString(err));
+      throw std::runtime_error(
+              std::string("mono8->NV12 UV-plane cudaMemset2DAsync failed: ") +
+              cudaGetErrorString(err));
+    }
   }
 
   publishOutput(std::move(output_msg), *msg);

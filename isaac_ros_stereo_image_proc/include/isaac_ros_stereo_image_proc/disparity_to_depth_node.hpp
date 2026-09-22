@@ -17,17 +17,11 @@
 
 #pragma once
 
-#include <string>
-#include <chrono>
-#include <utility>
-#include <vector>
-
 #include "isaac_ros_common/cuda_stream.hpp"
 #include "isaac_ros_common/qos.hpp"
-#include "isaac_ros_nitros/types/cuda_memory_pool.hpp"
-#include "isaac_ros_nitros_disparity_image_type/nitros_disparity_image.hpp"
-#include "isaac_ros_nitros_image_type/nitros_image.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "sensor_msgs/msg/image.hpp"
+#include "stereo_msgs/msg/disparity_image.hpp"
 
 namespace nvidia
 {
@@ -44,26 +38,22 @@ public:
   ~DisparityToDepthNode();
 
   DisparityToDepthNode(const DisparityToDepthNode &) = delete;
-
   DisparityToDepthNode & operator=(const DisparityToDepthNode &) = delete;
 
 private:
   void DisparityToDepthCallback(
-    const nvidia::isaac_ros::nitros::NitrosDisparityImage::ConstSharedPtr & disparity_msg);
+    const stereo_msgs::msg::DisparityImage::ConstSharedPtr & disparity_msg);
 
   // Parameters
-  const int64_t memory_pool_block_size_;
-  const int64_t memory_pool_num_blocks_;
   rclcpp::QoS input_qos_;
   rclcpp::QoS output_qos_;
 
   // Subscribers and publishers
-  rclcpp::Subscription<nvidia::isaac_ros::nitros::NitrosDisparityImage>::SharedPtr disparity_sub_;
-  rclcpp::Publisher<nvidia::isaac_ros::nitros::NitrosImage>::SharedPtr depth_pub_;
+  rclcpp::Subscription<stereo_msgs::msg::DisparityImage>::SharedPtr disparity_sub_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_pub_;
 
   // Resources
   ::nvidia::isaac_ros::common::CudaStreamPtr cuda_stream_;
-  nvidia::isaac_ros::nitros::CUDAMemoryPool pool_;
 };
 
 }  // namespace stereo_image_proc

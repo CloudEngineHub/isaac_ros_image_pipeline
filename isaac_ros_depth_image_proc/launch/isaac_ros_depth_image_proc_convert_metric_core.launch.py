@@ -44,10 +44,10 @@ def generate_launch_description():
         namespace='',
         executable='component_container_mt',
         composable_node_descriptions=IsaacROSConvertMetricLaunchFragment
-        .get_composable_nodes().values(),
+        .get_composable_nodes({}).values(),
         output='screen'
     )
 
     return launch.LaunchDescription(
         [convert_metric_container] +
-        IsaacROSConvertMetricLaunchFragment.get_launch_actions().values())
+        list(IsaacROSConvertMetricLaunchFragment.get_launch_actions({}).values()))

@@ -52,7 +52,6 @@ set_property(TARGET alpha_blend_node PROPERTY COMPILE_OPTIONS ${target_options})
 
 # image_format_converter_node
 ament_auto_add_library(image_format_converter_node SHARED src/image_format_converter_node.cpp)
-ament_target_dependencies(image_format_converter_node rclcpp rclcpp_components isaac_ros_cvcuda_utils)
 target_link_libraries(image_format_converter_node cvcuda nvcv_types)
 rclcpp_components_register_nodes(image_format_converter_node "nvidia::isaac_ros::image_proc::ImageFormatConverterNode")
 set(node_plugins "${node_plugins}nvidia::isaac_ros::image_proc::ImageFormatConverterNode;$<TARGET_FILE:image_format_converter_node>\n")
@@ -74,7 +73,6 @@ set_target_properties(rectify_node PROPERTIES
 
 # resize_node
 ament_auto_add_library(resize_node SHARED src/resize_node.cpp)
-ament_target_dependencies(resize_node rclcpp rclcpp_components isaac_ros_cvcuda_utils)
 target_link_libraries(resize_node cvcuda)
 rclcpp_components_register_nodes(resize_node "nvidia::isaac_ros::image_proc::ResizeNode")
 set(node_plugins "${node_plugins}nvidia::isaac_ros::image_proc::ResizeNode;$<TARGET_FILE:resize_node>\n")
@@ -83,9 +81,8 @@ set_target_properties(resize_node PROPERTIES
   BUILD_RPATH_USE_ORIGIN TRUE
   INSTALL_RPATH_USE_LINK_PATH TRUE)
 
-# flip_node (GXF-free, uses NitrosImage)
+# flip_node
 ament_auto_add_library(flip_node SHARED src/image_flip_node.cpp)
-ament_target_dependencies(flip_node rclcpp rclcpp_components isaac_ros_cvcuda_utils)
 target_link_libraries(flip_node cvcuda nvcv_types)
 rclcpp_components_register_nodes(flip_node "nvidia::isaac_ros::image_proc::ImageFlipNode")
 set(node_plugins "${node_plugins}nvidia::isaac_ros::image_proc::ImageFlipNode;$<TARGET_FILE:flip_node>\n")
@@ -106,7 +103,6 @@ set_target_properties(crop_node PROPERTIES
 
 # pad_node
 ament_auto_add_library(pad_node SHARED src/pad_node.cpp)
-ament_target_dependencies(pad_node rclcpp rclcpp_components isaac_ros_cvcuda_utils)
 rclcpp_components_register_nodes(pad_node "nvidia::isaac_ros::image_proc::PadNode")
 target_link_libraries(pad_node cvcuda nvcv_types)
 set(node_plugins "${node_plugins}nvidia::isaac_ros::image_proc::PadNode;$<TARGET_FILE:pad_node>\n")
@@ -117,7 +113,6 @@ ament_auto_add_library(image_normalize_node SHARED src/image_normalize_node.cpp)
     "nvidia::isaac_ros::image_proc::ImageNormalizeNode")
   set(node_plugins
     "${node_plugins}nvidia::isaac_ros::image_proc::ImageNormalizeNode;$<TARGET_FILE:image_normalize_node>\n")
-  ament_target_dependencies(image_normalize_node rclcpp rclcpp_components isaac_ros_cvcuda_utils)
   target_link_libraries(image_normalize_node cvcuda nvcv_types)
   set_target_properties(image_normalize_node PROPERTIES
     BUILD_WITH_INSTALL_RPATH TRUE
@@ -147,36 +142,26 @@ if(BUILD_TESTING)
   ament_add_gtest(alpha_blend_test test/alpha_blend_test.cpp)
   target_link_libraries(alpha_blend_test alpha_blend_node)
   target_include_directories(alpha_blend_node PUBLIC include/)
-  ament_target_dependencies(alpha_blend_node rclcpp)
-  ament_target_dependencies(alpha_blend_node isaac_ros_nitros)
 
   # Gtest for image format converter node
   ament_add_gtest(image_format_converter_node_test test/image_format_converter_node_test.cpp)
   target_link_libraries(image_format_converter_node_test image_format_converter_node)
   target_include_directories(image_format_converter_node_test PUBLIC include/)
-  ament_target_dependencies(image_format_converter_node_test rclcpp)
-  ament_target_dependencies(image_format_converter_node_test isaac_ros_nitros)
 
   # Gtest for crop node
   ament_add_gtest(crop_node_test test/crop_node_test.cpp)
   target_link_libraries(crop_node_test crop_node)
   target_include_directories(crop_node_test PUBLIC include/)
-  ament_target_dependencies(crop_node_test rclcpp)
-  ament_target_dependencies(crop_node_test isaac_ros_nitros)
 
   # Gtest for pad node
   ament_add_gtest(pad_node_test test/pad_node_test.cpp)
   target_link_libraries(pad_node_test pad_node)
   target_include_directories(pad_node_test PUBLIC include/)
-  ament_target_dependencies(pad_node_test rclcpp)
-  ament_target_dependencies(pad_node_test isaac_ros_nitros)
 
   # Gtest for resize node
   ament_add_gtest(resize_node_test test/resize_node_test.cpp)
   target_link_libraries(resize_node_test resize_node)
   target_include_directories(resize_node_test PUBLIC include/)
-  ament_target_dependencies(resize_node_test rclcpp)
-  ament_target_dependencies(resize_node_test isaac_ros_nitros)
 
   # The FindPythonInterp and FindPythonLibs modules are removed
   if(POLICY CMP0148)

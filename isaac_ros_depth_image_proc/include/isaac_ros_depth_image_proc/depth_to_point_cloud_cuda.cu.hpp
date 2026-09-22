@@ -25,9 +25,6 @@
 
 #include "cuda.h"  // NOLINT - include .h without directory
 
-#include "isaac_ros_nitros_image_type/nitros_image.hpp"
-#include "isaac_ros_nitros_point_cloud_type/nitros_point_cloud.hpp"
-
 namespace nvidia
 {
 namespace isaac_ros

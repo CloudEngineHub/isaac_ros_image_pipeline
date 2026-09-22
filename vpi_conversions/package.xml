@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>vpi_conversions</name>
+  <version>5.0.0</version>
+  <description>
+    Header-only converter between sensor_msgs/Image (backed by rosidl::Buffer) and
+    NVIDIA VPI VPIImage, riding on the registered rosidl::Buffer backend. Modeled
+    after cvcuda_conversions; the cuda_buffer-backed analog of isaac_ros_vpi_utils.
+  </description>
+
+  <maintainer email="isaac-ros-maintainers@nvidia.com">Isaac ROS Maintainers</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake_auto</buildtool_depend>
+
+  <depend>cuda_buffer</depend>
+  <depend>sensor_msgs</depend>
+  <depend>stereo_msgs</depend>
+
+  <depend>libnvvpi4</depend>
+  <build_depend>vpi4-dev</build_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -24,6 +24,7 @@
 #include <string>
 #include <utility>
 
+#include "cuda_buffer/cuda_buffer_api.hpp"
 #include "isaac_ros_common/qos.hpp"
 #include "isaac_ros_common/cuda_stream.hpp"
 #include "isaac_ros_cvcuda_utils/cvcuda_utilities.hpp"
@@ -109,8 +110,6 @@ ResizeNode::ResizeNode(const rclcpp::NodeOptions & options)
 : rclcpp::Node("ResizeNode", options),
   output_width_(declare_parameter<int64_t>("output_width", 1080)),
   output_height_(declare_parameter<int64_t>("output_height", 720)),
-  memory_pool_block_size_(declare_parameter<int64_t>("memory_pool_block_size", 1920 * 1200 * 4)),
-  memory_pool_num_blocks_(declare_parameter<int64_t>("memory_pool_num_blocks", 40)),
   interp_type_(declare_parameter<std::string>("interp_type", "linear")),
   border_type_(declare_parameter<std::string>("border_type", "zero")),
   keep_aspect_ratio_(declare_parameter<bool>("keep_aspect_ratio", false)),
@@ -135,33 +134,28 @@ ResizeNode::ResizeNode(const rclcpp::NodeOptions & options)
 
   cuda_stream_ = ::nvidia::isaac_ros::common::createCudaStream("ResizeNode");
 
-  cudaError_t pool_err = pool_.create(
-    static_cast<size_t>(memory_pool_block_size_),
-    static_cast<size_t>(memory_pool_num_blocks_),
-    nvidia::isaac_ros::nitros::CUDAMemoryPool::MemoryType::Device);
-  CHECK_CUDA_ERROR(pool_err, "[ResizeNode] Failed to create CUDA memory pool");
-
   const rclcpp::QoS input_qos =
     ::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "input_qos")
     .keep_last(input_queue_size_);
   const rclcpp::QoS output_qos =
     ::isaac_ros::common::AddQosParameter(*this, "DEFAULT", "output_qos")
     .keep_last(output_queue_size_);
-  const rmw_qos_profile_t input_qos_profile = input_qos.get_rmw_qos_profile();
 
   // Create subscribers
   rclcpp::SubscriptionOptions sub_options;
   sub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
+  // Accept GPU-backed image buffers; from_input_buffer promotes CPU buffers as needed.
+  sub_options.acceptable_buffer_backends = "any";
   rclcpp::PublisherOptions pub_options;
   pub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
   exact_sync_.registerCallback(
     std::bind(
       &ResizeNode::InputCallback, this,
       std::placeholders::_1, std::placeholders::_2));
-  image_sub_.subscribe(this, "image", input_qos_profile, sub_options);
-  camera_info_sub_.subscribe(this, "camera_info", input_qos_profile, sub_options);
+  image_sub_.subscribe(this, "image", input_qos, sub_options);
+  camera_info_sub_.subscribe(this, "camera_info", input_qos, sub_options);
 
-  image_pub_ = create_publisher<nvidia::isaac_ros::nitros::NitrosImage>(
+  image_pub_ = create_publisher<sensor_msgs::msg::Image>(
     "resize/image", output_qos, pub_options);
   camera_info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>(
     "resize/camera_info", output_qos, pub_options);
@@ -172,30 +166,31 @@ ResizeNode::ResizeNode(const rclcpp::NodeOptions & options)
 ResizeNode::~ResizeNode() {}
 
 void ResizeNode::InputCallback(
-  const nvidia::isaac_ros::nitros::NitrosImage::ConstSharedPtr & nitros_image,
+  const sensor_msgs::msg::Image::ConstSharedPtr & image,
   const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info)
 {
   RCLCPP_DEBUG(get_logger(), "[ResizeNode] InputCallback - SYNCHRONIZED!");
 
-  if (!nitros_image || !camera_info) {
+  if (!image || !camera_info) {
     throw std::runtime_error("[ResizeNode] No inputs received");
   }
 
-  const cvcuda_utils::NVCVImageFormat format = cvcuda_utils::ToNVCVFormat(nitros_image->encoding);
   if (keep_aspect_ratio_ && disable_padding_) {
-    CalculateOutputDims(nitros_image->width, nitros_image->height, output_width_, output_height_);
+    CalculateOutputDims(image->width, image->height, output_width_, output_height_);
   }
 
   if (keep_aspect_ratio_ && !disable_padding_) {
+    const cvcuda_utils::NVCVImageFormat format =
+      cvcuda_utils::ToNVCVFormat(image->encoding);
     resize_out_img_width_ = output_width_;
     resize_out_img_height_ = output_height_;
-    CalculateOutputDims(nitros_image->width, nitros_image->height,
+    CalculateOutputDims(image->width, image->height,
       resize_out_img_width_, resize_out_img_height_);
     if (resize_out_img_width_ <= 0 || resize_out_img_height_ <= 0) {
       RCLCPP_ERROR(get_logger(),
         "[ResizeNode] Invalid resized dimensions %ldx%ld (input %dx%d)",
         resize_out_img_width_, resize_out_img_height_,
-        nitros_image->width, nitros_image->height);
+        image->width, image->height);
       return;
     }
     resized_tensor_ = nvcv::Tensor(1,
@@ -203,36 +198,30 @@ void ResizeNode::InputCallback(
           static_cast<int32_t>(resize_out_img_height_)},
       format.format);
   }
-  const int num_channels{sensor_msgs::image_encodings::numChannels(nitros_image->encoding)};
-  const int bytes_per_channel =
-    sensor_msgs::image_encodings::bitDepth(nitros_image->encoding) / CHAR_BIT;
-  auto input_handle = cvcuda_utils::WrapCVCUDATensor(
-    *nitros_image, nitros_image->get_read_handle(*cuda_stream_),
-    format.format, num_channels, bytes_per_channel);
+  auto output_image = cvcuda_conversions::allocate_image_msg(
+    static_cast<uint32_t>(output_width_), static_cast<uint32_t>(output_height_),
+    image->encoding);
+  output_image->header = image->header;
 
-  auto output_image = std::make_unique<nvidia::isaac_ros::nitros::NitrosImage>();
-  size_t output_step = num_channels * bytes_per_channel * output_width_;
-  auto output_write_handle = output_image->from_pool(
-    pool_, output_width_, output_height_, output_step, nitros_image->encoding, *cuda_stream_);
-  auto output_handle = cvcuda_utils::WrapCVCUDATensor(
-    *output_image, std::move(output_write_handle),
-    format.format, num_channels, bytes_per_channel);
+  // Scope the tensors so the read/write CUDA events are recorded on the stream
+  // before the output message is published.
+  {
+    auto input_tensor = cvcuda_conversions::from_input_image_msg(*image, *cuda_stream_);
+    auto output_tensor = cvcuda_conversions::from_output_image_msg(*output_image, *cuda_stream_);
 
-  const NVCVInterpolationType interp_type = cvcuda_utils::ToNVCVInterpolationType(interp_type_);
-  if (keep_aspect_ratio_ && !disable_padding_) {
-    resize_op_(*cuda_stream_, input_handle.get_tensor(), resized_tensor_, interp_type);
+    const NVCVInterpolationType interp_type = cvcuda_utils::ToNVCVInterpolationType(interp_type_);
+    if (keep_aspect_ratio_ && !disable_padding_) {
+      resize_op_(*cuda_stream_, input_tensor, resized_tensor_, interp_type);
 
-    float4 border_value = {0.0f, 0.0f, 0.0f, 0.0f};
-    int32_t top = (output_height_ - resize_out_img_height_) / 2;
-    int32_t left = (output_width_ - resize_out_img_width_) / 2;
-    copy_make_border_op_(*cuda_stream_, resized_tensor_, output_handle.get_tensor(), top, left,
-      NVCV_BORDER_CONSTANT, border_value);
-  } else {
-    resize_op_(*cuda_stream_, input_handle.get_tensor(), output_handle.get_tensor(), interp_type);
+      float4 border_value = {0.0f, 0.0f, 0.0f, 0.0f};
+      int32_t top = (output_height_ - resize_out_img_height_) / 2;
+      int32_t left = (output_width_ - resize_out_img_width_) / 2;
+      copy_make_border_op_(*cuda_stream_, resized_tensor_, output_tensor, top, left,
+        NVCV_BORDER_CONSTANT, border_value);
+    } else {
+      resize_op_(*cuda_stream_, input_tensor, output_tensor, interp_type);
+    }
   }
-  output_image->timestamp_sec = nitros_image->timestamp_sec;
-  output_image->timestamp_nsec = nitros_image->timestamp_nsec;
-  output_image->frame_id = nitros_image->frame_id;
 
   auto camera_info_msg = std::make_unique<sensor_msgs::msg::CameraInfo>();
   UpdateCameraInfo(*camera_info, *camera_info_msg);

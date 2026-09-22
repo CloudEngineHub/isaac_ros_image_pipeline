@@ -23,6 +23,7 @@
 #include <string>
 #include <utility>
 
+#include "cuda_buffer/cuda_buffer_api.hpp"
 #include "isaac_ros_common/cuda_stream.hpp"
 #include "isaac_ros_common/qos.hpp"
 #include "isaac_ros_cvcuda_utils/cvcuda_utilities.hpp"
@@ -42,15 +43,13 @@ RectifyNode::RectifyNode(const rclcpp::NodeOptions & options)
   interpolation_(declare_parameter<std::string>("interpolation", "cubic")),
   border_type_(declare_parameter<std::string>("border_type", "CONSTANT")),
   border_constant_(declare_parameter<std::vector<double>>(
-    "border_constant",
+      "border_constant",
       {0.0, 0.0, 0.0, 0.0})),
   align_corners_(declare_parameter<bool>("align_corners", true)),
   map_value_type_(declare_parameter<std::string>("map_value_type", "ABSOLUTE")),
-  map_interpolation_type_(declare_parameter<std::string>("map_interpolation_type",
-    "cubic")),
-  memory_pool_block_size_(declare_parameter<int64_t>("memory_pool_block_size",
-    output_width_ * output_height_ * 4)),
-  memory_pool_num_blocks_(declare_parameter<int64_t>("memory_pool_num_blocks", 40)),
+  map_interpolation_type_(declare_parameter<std::string>(
+      "map_interpolation_type",
+      "cubic")),
   input_queue_size_(declare_parameter<int64_t>("input_queue_size", 10)),
   output_queue_size_(declare_parameter<int64_t>("output_queue_size", 10)),
   image_sub_{},
@@ -68,23 +67,17 @@ RectifyNode::RectifyNode(const rclcpp::NodeOptions & options)
 
   cuda_stream_ = ::nvidia::isaac_ros::common::createCudaStream("RectifyNode");
 
-  // Create CUDA memory pool
-  cudaError_t err = pool_.create(
-    static_cast<size_t>(memory_pool_block_size_),
-    static_cast<size_t>(memory_pool_num_blocks_),
-    nvidia::isaac_ros::nitros::CUDAMemoryPool::MemoryType::Device);
-  CHECK_CUDA_ERROR(err, "[RectifyNode] Failed to create CUDA memory pool");
-
-  // This function sets the QoS parameter for publishers and subscribers setup by this NITROS node
+  // Set the QoS parameter for the publishers and subscribers.
   const rclcpp::QoS input_qos = ::isaac_ros::common::AddQosParameter(
     *this, "DEFAULT", "input_qos").keep_last(input_queue_size_);
   const rclcpp::QoS output_qos = ::isaac_ros::common::AddQosParameter(
     *this, "DEFAULT", "output_qos").keep_last(output_queue_size_);
-  const rmw_qos_profile_t rmw_qos_profile = input_qos.get_rmw_qos_profile();
 
   // Subscription options (can be used for callback groups, etc.)
   rclcpp::SubscriptionOptions sub_options;
   sub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
+  // Accept GPU-backed image buffers; from_input_buffer promotes CPU buffers as needed.
+  sub_options.acceptable_buffer_backends = "any";
 
   // Publisher options
   rclcpp::PublisherOptions pub_options;
@@ -95,10 +88,10 @@ RectifyNode::RectifyNode(const rclcpp::NodeOptions & options)
     std::bind(
       &RectifyNode::InputCallback, this,
       std::placeholders::_1, std::placeholders::_2));
-  image_sub_.subscribe(this, "image_raw", rmw_qos_profile, sub_options);
-  camera_info_sub_.subscribe(this, "camera_info", rmw_qos_profile, sub_options);
+  image_sub_.subscribe(this, "image_raw", input_qos, sub_options);
+  camera_info_sub_.subscribe(this, "camera_info", input_qos, sub_options);
 
-  image_pub_ = create_publisher<nvidia::isaac_ros::nitros::NitrosImage>(
+  image_pub_ = create_publisher<sensor_msgs::msg::Image>(
     "image_rect", output_qos, pub_options);
   camera_info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>(
     "camera_info_rect", output_qos, pub_options);
@@ -108,7 +101,8 @@ RectifyNode::~RectifyNode()
 {
   RCLCPP_DEBUG(get_logger(), "[RectifyNode] Destructor");
   if (map_buffer_ != nullptr) {
-    CHECK_CUDA_ERROR(cudaFreeAsync(map_buffer_, *cuda_stream_),
+    CHECK_CUDA_ERROR(
+      cudaFreeAsync(map_buffer_, *cuda_stream_),
       "[RectifyNode] cudaFreeAsync for remap map buffer failed");
   }
 }
@@ -180,19 +174,23 @@ void RectifyNode::InitRemapMapAndOutputCameraInfo(
   } else if (camera_info.distortion_model == "plumb_bob") {
     cv::Matx<double, 1, 5> coefficients = {camera_info.d[0], camera_info.d[1],
       camera_info.d[2], camera_info.d[3], camera_info.d[4]};
-    cv::initUndistortRectifyMap(intrinsics, coefficients, rotation, new_intrinsics,
+    cv::initUndistortRectifyMap(
+      intrinsics, coefficients, rotation, new_intrinsics,
       imageSize, CV_32FC2, remap_map, unused);
   } else if (camera_info.distortion_model == "rational_polynomial") {
     cv::Matx<double, 1, 8> coefficients = {camera_info.d[0], camera_info.d[1], camera_info.d[2],
       camera_info.d[3], camera_info.d[4], camera_info.d[5],
       camera_info.d[6], camera_info.d[7]};
-    cv::initUndistortRectifyMap(intrinsics, coefficients, rotation, new_intrinsics,
+    cv::initUndistortRectifyMap(
+      intrinsics, coefficients, rotation, new_intrinsics,
       imageSize, CV_32FC2, remap_map, unused);
   } else {
-    RCLCPP_ERROR(get_logger(), "[RectifyNode] Unsupported distortion model: %s",
+    RCLCPP_ERROR(
+      get_logger(), "[RectifyNode] Unsupported distortion model: %s",
       camera_info.distortion_model.c_str());
-    throw std::runtime_error("[RectifyNode] Unsupported distortion model: " +
-      camera_info.distortion_model);
+    throw std::runtime_error(
+            "[RectifyNode] Unsupported distortion model: " +
+            camera_info.distortion_model);
     return;
   }
 
@@ -201,10 +199,13 @@ void RectifyNode::InitRemapMapAndOutputCameraInfo(
     auto err = cudaMallocAsync(&map_buffer_, map_buffer_size, *cuda_stream_);
     CHECK_CUDA_ERROR(err, "[RectifyNode] cudaMalloc for remap map buffer failed");
   }
-  CHECK_CUDA_ERROR(cudaMemcpyAsync(map_buffer_, remap_map.data, map_buffer_size,
-    cudaMemcpyHostToDevice, *cuda_stream_),
+  CHECK_CUDA_ERROR(
+    cudaMemcpyAsync(
+      map_buffer_, remap_map.data, map_buffer_size,
+      cudaMemcpyHostToDevice, *cuda_stream_),
     "[RectifyNode] cudaMemcpy map failed");
-  CHECK_CUDA_ERROR(cudaStreamSynchronize(*cuda_stream_),
+  CHECK_CUDA_ERROR(
+    cudaStreamSynchronize(*cuda_stream_),
     "[RectifyNode] cudaStreamSynchronize for remap map failed");
   remap_map_ = WrapOpencvCVMapToCVCUDATensor(remap_map, map_buffer_);
 
@@ -218,37 +219,26 @@ void RectifyNode::InitRemapMapAndOutputCameraInfo(
 }
 
 void RectifyNode::InputCallback(
-  const nvidia::isaac_ros::nitros::NitrosImage::ConstSharedPtr & image,
+  const sensor_msgs::msg::Image::ConstSharedPtr & image,
   const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info)
 {
   RCLCPP_DEBUG(get_logger(), "[RectifyNode] InputCallback");
 
   InitRemapMapAndOutputCameraInfo(*camera_info);
-  const int num_channels{sensor_msgs::image_encodings::numChannels(image->encoding)};
-  const int bytes_per_element =
-    sensor_msgs::image_encodings::bitDepth(image->encoding) / CHAR_BIT;
-  const cvcuda_utils::NVCVImageFormat format = cvcuda_utils::ToNVCVFormat(image->encoding);
-  auto input_handle = cvcuda_utils::WrapCVCUDATensor(
-    *image, image->get_read_handle(*cuda_stream_),
-    format.format, num_channels, bytes_per_element);
+  auto output_image = cvcuda_conversions::allocate_image_msg(
+    static_cast<uint32_t>(output_width_), static_cast<uint32_t>(output_height_), image->encoding);
+  output_image->header = image->header;
 
-  // Create output images
-  auto output_image = std::make_unique<nvidia::isaac_ros::nitros::NitrosImage>();
-  size_t output_step = output_width_ * num_channels * bytes_per_element;
-  auto output_write_handle = output_image->from_pool(
-    pool_, output_width_, output_height_, output_step, image->encoding, *cuda_stream_);
+  // Scope the tensors so the read/write CUDA events are recorded on the stream
+  // before the output message is published.
+  {
+    auto input_tensor = cvcuda_conversions::from_input_image_msg(*image, *cuda_stream_);
+    auto output_tensor = cvcuda_conversions::from_output_image_msg(*output_image, *cuda_stream_);
 
-  auto output_handle = cvcuda_utils::WrapCVCUDATensor(
-    *output_image, std::move(output_write_handle),
-    format.format, num_channels, bytes_per_element);
-
-  // Remap
-  remap_op_(*cuda_stream_, input_handle.get_tensor(), output_handle.get_tensor(),
-    remap_map_, inInterp_, mapInterp_, mapValueType_, align_corners_, border_, borderValue_);
-
-  output_image->timestamp_sec = image->timestamp_sec;
-  output_image->timestamp_nsec = image->timestamp_nsec;
-  output_image->frame_id = image->frame_id;
+    remap_op_(
+      *cuda_stream_, input_tensor, output_tensor,
+      remap_map_, inInterp_, mapInterp_, mapValueType_, align_corners_, border_, borderValue_);
+  }
 
   auto camera_info_msg = std::make_unique<sensor_msgs::msg::CameraInfo>();
   *camera_info_msg = cached_output_camera_info_;

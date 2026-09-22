@@ -19,9 +19,10 @@
 
 #include <cuda_runtime.h>
 
+#include "cuda_buffer/cuda_buffer_api.hpp"
 #include "isaac_ros_common/cuda_stream.hpp"
 #include "isaac_ros_common/qos.hpp"
-#include "isaac_ros_cvcuda_utils/cvcuda_handle.hpp"
+#include "cvcuda_conversions/cvcuda_conversions.hpp"
 #include "isaac_ros_cvcuda_utils/cvcuda_utilities.hpp"
 #include "sensor_msgs/image_encodings.hpp"
 
@@ -31,9 +32,6 @@ namespace isaac_ros
 {
 namespace image_proc
 {
-
-using nvidia::isaac_ros::nitros::NitrosImage;
-using nvidia::isaac_ros::nitros::CUDAMemoryPool;
 
 namespace
 {
@@ -116,9 +114,7 @@ PadNode::PadNode(const rclcpp::NodeOptions & options)
   padding_type_(declare_parameter<std::string>("padding_type", "CENTER")),
   border_type_(declare_parameter<std::string>("border_type", "CONSTANT")),
   border_pixel_color_value_(
-    declare_parameter<std::vector<double>>("border_pixel_color_value", {0.0, 0.0, 0.0, 0.0})),
-  memory_pool_block_size_(declare_parameter<int64_t>("memory_pool_block_size", 1920 * 1200 * 4)),
-  memory_pool_num_blocks_(declare_parameter<int64_t>("memory_pool_num_blocks", 40))
+    declare_parameter<std::vector<double>>("border_pixel_color_value", {0.0, 0.0, 0.0, 0.0}))
 {
   auto img_padding_itr = kStringToPaddingTypeMap.find(padding_type_);
   if (img_padding_itr == std::end(kStringToPaddingTypeMap)) {
@@ -140,30 +136,25 @@ PadNode::PadNode(const rclcpp::NodeOptions & options)
   }
   cuda_stream_ = ::nvidia::isaac_ros::common::createCudaStream("PadNode");
 
-  // Create CUDA memory pool
-  cudaError_t err = pool_.create(
-    static_cast<size_t>(memory_pool_block_size_),
-    static_cast<size_t>(memory_pool_num_blocks_),
-    CUDAMemoryPool::MemoryType::Device);
-  CHECK_CUDA_ERROR(err, "Failed to create CUDA memory pool");
-
   // Subscription options
   rclcpp::SubscriptionOptions sub_options;
   sub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
+  // Accept GPU-backed image buffers; from_input_buffer promotes CPU buffers as needed.
+  sub_options.acceptable_buffer_backends = "any";
   // Publisher options
   rclcpp::PublisherOptions pub_options;
   pub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
 
   // Create subscribers and publishers
-  image_sub_ = create_subscription<NitrosImage>(
+  image_sub_ = create_subscription<sensor_msgs::msg::Image>(
     "image", input_qos_,
     std::bind(&PadNode::imageSubCallback, this, std::placeholders::_1), sub_options);
-  image_pub_ = create_publisher<NitrosImage>("padded_image", output_qos_, pub_options);
+  image_pub_ = create_publisher<sensor_msgs::msg::Image>("padded_image", output_qos_, pub_options);
 }
 
 PadNode::~PadNode() {}
 
-void PadNode::imageSubCallback(const NitrosImage::SharedPtr msg)
+void PadNode::imageSubCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg)
 {
   uint16_t input_width = msg->width;
   uint16_t input_height = msg->height;
@@ -183,68 +174,65 @@ void PadNode::imageSubCallback(const NitrosImage::SharedPtr msg)
     "[PadNode] Input width: %d, height: %d, num_channels: %d,"
     "bytes_per_channel: %d",
     msg->width, msg->height, num_channels, bytes_per_channel);
-  auto input_handle = cvcuda_utils::WrapCVCUDATensor(
-    *msg, msg->get_read_handle(*cuda_stream_), input_format.format, num_channels,
-    bytes_per_channel);
 
-  auto input_data = const_cast<void *>(static_cast<const void *>(
-      input_handle.get_buffer_data_ptr()));
-  auto output_msg = std::make_unique<NitrosImage>();
-  size_t output_step = num_channels * bytes_per_channel * output_image_width_;
-  auto output_write_handle = output_msg->from_pool(
-    pool_, output_image_width_, output_image_height_, output_step, msg->encoding, *cuda_stream_);
+  auto output_msg = cvcuda_conversions::allocate_image_msg(
+    output_image_width_, output_image_height_, msg->encoding);
+  output_msg->header = msg->header;
 
-  auto output_handle = cvcuda_utils::WrapCVCUDATensor(
-    *output_msg, std::move(output_write_handle), input_format.format, num_channels,
-    bytes_per_channel);
-  auto output_data = const_cast<uint8_t *>(output_handle.get_buffer_data_ptr());
-  if (padding_type_val_ == PaddingType::kCenter) {
-    int top = (output_image_height_ - input_height) / 2;
-    int left = (output_image_width_ - input_width) / 2;
+  // Scope the tensors so the read/write CUDA events are recorded on the stream
+  // before the output message is published.
+  {
+    auto input_tensor = cvcuda_conversions::from_input_image_msg(*msg, *cuda_stream_);
+    auto output_tensor = cvcuda_conversions::from_output_image_msg(*output_msg, *cuda_stream_);
 
-    make_border_op_(
-      *cuda_stream_, input_handle.get_tensor(),
-      output_handle.get_tensor(), top, left, border_type_val_,
-      {border_values_float_[0], border_values_float_[1],
-        border_values_float_[2], border_values_float_[3]}
-    );
-  } else {
-    // Initialize to 0 image.
-    CHECK_CUDA_ERROR(
-      cudaMemsetAsync(output_data, 0,
-        output_image_height_ * output_image_width_ * num_channels * bytes_per_channel,
-        *cuda_stream_),
-      "cudaMemsetAsync failed");
+    void * input_data = cvcuda_conversions::tensor_base_ptr(input_tensor);
+    uint8_t * output_data = cvcuda_conversions::tensor_base_ptr(output_tensor);
 
-    // Calculate offset for the specified type of padding
-    std::vector<int64_t> input_strides;
-    CalculateStrides(input_format.format, input_width, input_height, input_strides);
-    std::vector<int64_t> output_strides;
-    CalculateStrides(input_format.format, output_image_width_, output_image_height_,
-      output_strides);
+    if (padding_type_val_ == PaddingType::kCenter) {
+      int top = (output_image_height_ - input_height) / 2;
+      int left = (output_image_width_ - input_width) / 2;
 
-    uint32_t offset = CalculateOffset(
-      input_width, input_height, output_image_width_, output_image_height_,
-      padding_type_val_, output_strides
-    );
+      make_border_op_(
+        *cuda_stream_, input_tensor,
+        output_tensor, top, left, border_type_val_,
+        {border_values_float_[0], border_values_float_[1],
+          border_values_float_[2], border_values_float_[3]}
+      );
+    } else {
+      // Initialize to 0 image.
+      CHECK_CUDA_ERROR(
+        cudaMemsetAsync(output_data, 0,
+          output_image_height_ * output_image_width_ * num_channels * bytes_per_channel,
+          *cuda_stream_),
+        "cudaMemsetAsync failed");
 
-    // Copy input image to to the corner.
-    CHECK_CUDA_ERROR(
-      cudaMemcpy2DAsync(
-        reinterpret_cast<uint8_t *>(output_data + offset),
-        output_strides[1],
-        input_data,
-        input_strides[1],
-        input_strides[1],
-        input_height,
-        cudaMemcpyDefault,
-        *cuda_stream_),
-        "cudaMemcpy2DAsync failed");
+      // Calculate offset for the specified type of padding
+      std::vector<int64_t> input_strides;
+      CalculateStrides(input_format.format, input_width, input_height, input_strides);
+      std::vector<int64_t> output_strides;
+      CalculateStrides(input_format.format, output_image_width_, output_image_height_,
+        output_strides);
+
+      uint32_t offset = CalculateOffset(
+        input_width, input_height, output_image_width_, output_image_height_,
+        padding_type_val_, output_strides
+      );
+
+      // Copy input image to to the corner.
+      CHECK_CUDA_ERROR(
+        cudaMemcpy2DAsync(
+          reinterpret_cast<uint8_t *>(output_data + offset),
+          output_strides[1],
+          input_data,
+          input_strides[1],
+          input_strides[1],
+          input_height,
+          cudaMemcpyDefault,
+          *cuda_stream_),
+          "cudaMemcpy2DAsync failed");
+    }
   }
 
-  output_msg->timestamp_sec = msg->timestamp_sec;
-  output_msg->timestamp_nsec = msg->timestamp_nsec;
-  output_msg->frame_id = msg->frame_id;
   image_pub_->publish(std::move(output_msg));
 }
 

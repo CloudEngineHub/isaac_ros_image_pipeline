@@ -18,15 +18,13 @@
 #ifndef ISAAC_ROS_DEPTH_IMAGE_PROC__CONVERT_METRIC_NODE_HPP_
 #define ISAAC_ROS_DEPTH_IMAGE_PROC__CONVERT_METRIC_NODE_HPP_
 
-#include <string>
 #include <memory>
+#include <string>
 
 #include "cvcuda/OpConvertTo.hpp"
-#include "isaac_ros_nitros_image_type/nitros_image.hpp"
-#include "isaac_ros_nitros/types/cuda_memory_pool.hpp"
+#include "isaac_ros_common/cuda_stream.hpp"
 #include "rclcpp/rclcpp.hpp"
-
-#include "cuda_runtime.h" // NOLINT
+#include "sensor_msgs/msg/image.hpp"
 
 namespace nvidia
 {
@@ -42,22 +40,16 @@ public:
   ~ConvertMetricNode();
 
 private:
-  void DepthCallback(const nvidia::isaac_ros::nitros::NitrosImage::SharedPtr msg);
+  void DepthCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg);
 
-  // ROS Node parameters
-  const int64_t memory_pool_block_size_;
-  const int64_t memory_pool_num_blocks_;
   const uint16_t input_queue_size_;
   const uint16_t output_queue_size_;
 
-  rclcpp::Subscription<nvidia::isaac_ros::nitros::NitrosImage>::SharedPtr image_sub_;
-  rclcpp::Publisher<nvidia::isaac_ros::nitros::NitrosImage>::SharedPtr image_pub_;
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
 
-  // CUDA resources
   ::nvidia::isaac_ros::common::CudaStreamPtr cuda_stream_;
-  nvidia::isaac_ros::nitros::CUDAMemoryPool pool_;
 
-  // CVCUDA operation
   cvcuda::ConvertTo convert_op_;
 };
 
